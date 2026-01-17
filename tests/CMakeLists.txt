@@ -19,6 +19,7 @@ target_link_libraries(alpbook_test
 target_sources(alpbook_test
         PRIVATE
         src/internal/pool.cpp
+        src/book/nasdaq.cpp
 )
 
 add_test(NAME alpbook_test COMMAND alpbook_test)

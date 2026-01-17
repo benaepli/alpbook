@@ -14,10 +14,6 @@ export module alpbook.book.nasdaq;
 export import :state;
 namespace alpbook::nasdaq
 {
-    enum class Error : uint8_t
-    {
-        MissingId,
-    };
     export constexpr auto DEFAULT_PRICE_LEVEL_POOL_SIZE = 50'000;
     export constexpr auto DEFAULT_ORDER_POOL_SIZE = 2'000'000;
     export struct AddOrder
@@ -107,13 +103,70 @@ namespace alpbook::nasdaq
 
         [[nodiscard]] Level getBestBid() const noexcept { return bestBid_; }
         [[nodiscard]] Level getBestAsk() const noexcept { return bestAsk_; }
-        [[nodiscard]] Level getBidLevel(int depth) const noexcept;
-        [[nodiscard]] Level getAskLevel(int depth) const noexcept;
-        [[nodiscard]] quantity_t getBuyVolumeAhead(price_t targetPrice) const noexcept;
-        [[nodiscard]] quantity_t getSellVolumeAhead(price_t targetPrice) const noexcept;
 
-        [[nodiscard]] quantity_t getBuyVolumeAheadByOrder(uint64_t orderID) const noexcept;
-        [[nodiscard]] quantity_t getSellVolumeAheadByOrder(uint64_t orderID) const noexcept;
+        /// Returns the bid level at the given depth. The time complexity is O(depth), so clients
+        /// should use this carefully.
+        [[nodiscard]] Level getBidLevel(uint32_t depth) const noexcept
+        {
+            return getLevelAtDepth(buyPool_, depth);
+        }
+
+        /// Returns the ask level at the given depth. The time complexity is O(depth), so clients
+        /// should use this carefully.
+        [[nodiscard]] Level getAskLevel(uint32_t depth) const noexcept
+        {
+            return getLevelAtDepth(sellPool_, depth);
+        }
+
+        /// Returns the total buy volume strictly better than the given price.
+        /// The time complexity is O(N), where N is the number of price levels
+        /// better than targetPrice.
+        [[nodiscard]] quantity_t getBuyVolumeAhead(price_t targetPrice) const noexcept
+        {
+            uint64_t volume = 0;
+            for (auto const& [price, id] : buyPool_.levels)
+            {
+                if (price <= targetPrice)
+                {
+                    break;
+                }
+                volume += buyPool_.pool[id].totalShares;
+            }
+            return quantity_t(volume);
+        }
+
+        /// Returns the total sell volume strictly better than the given price.
+        /// The time complexity is O(N), where N is the number of price levels
+        /// better than targetPrice.
+        [[nodiscard]] quantity_t getSellVolumeAhead(price_t targetPrice) const noexcept
+        {
+            uint64_t volume = 0;
+            for (auto const& [price, id] : sellPool_.levels)
+            {
+                if (price >= targetPrice)
+                {
+                    break;
+                }
+                volume += sellPool_.pool[id].totalShares;
+            }
+            return quantity_t(volume);
+        }
+
+        /// Returns the total volume ahead of a specific order. Time complexity is O(N + M) where N
+        /// is the number of better price levels and M is the order's position in its queue.
+        [[nodiscard]] std::expected<quantity_t, Error> getBuyVolumeAheadByOrder(
+            uint64_t orderID) const noexcept
+        {
+            return getVolumeAheadByOrderImpl(buyPool_, orderID);
+        }
+
+        /// Returns the total volume ahead of a specific order. Time complexity is O(N + M) where N
+        /// is the number of better price levels and M is the order's position in its queue.
+        [[nodiscard]] std::expected<quantity_t, Error> getSellVolumeAheadByOrder(
+            uint64_t orderID) const noexcept
+        {
+            return getVolumeAheadByOrderImpl(sellPool_, orderID);
+        }
 
         void add(AddOrder order)
         {
@@ -156,6 +209,8 @@ namespace alpbook::nasdaq
             return {};
         }
 
+        /// Replace is equivalent to cancelling an order and inserting a new one.
+        /// Replaced orders lose time priority.
         std::expected<void, Error> replace(ReplaceOrder order)
         {
             auto it = orderToDetails_.find(order.oldId);
@@ -180,7 +235,7 @@ namespace alpbook::nasdaq
 
       private:
         template<Side S>
-        decltype(auto) getPool()
+        auto& getPool()
         {
             if constexpr (S == Side::Buy)
             {
@@ -228,7 +283,7 @@ namespace alpbook::nasdaq
                 }
             }
 
-            auto newId = orderPool_.allocate(timestamp, orderId, shares, S);
+            auto newId = orderPool_.allocate(timestamp, orderId, shares, INVALID_ID, INVALID_ID, S);
             if (priceLevel.tail == INVALID_ID)
             {
                 priceLevel.head = newId;
@@ -369,7 +424,7 @@ namespace alpbook::nasdaq
         }
 
         template<typename M>
-        Level getBest(SizedPricePool<M>& pool)
+        Level getBest(SizedPricePool<M> const& pool) const
         {
             auto it = pool.levels.begin();
             if (it == pool.levels.end()) [[unlikely]]
@@ -378,6 +433,59 @@ namespace alpbook::nasdaq
             }
             auto const& priceLevel = pool.pool[it->second];
             return {.price = priceLevel.price, .quantity = priceLevel.totalShares};
+        }
+
+        template<typename M>
+        Level getLevelAtDepth(SizedPricePool<M> const& pool, uint32_t depth) const
+        {
+            auto it = pool.levels.begin();
+            if (it == pool.levels.end()) [[unlikely]]
+            {
+                return Level {};
+            }
+            for (auto i = 0; i < depth; i++)
+            {
+                ++it;
+                if (it == pool.levels.end()) [[unlikely]]
+                {
+                    return Level {};
+                }
+            }
+            auto const& priceLevel = pool.pool[it->second];
+            return {.price = priceLevel.price, .quantity = priceLevel.totalShares};
+        }
+
+        template<typename M>
+        [[nodiscard]] std::expected<quantity_t, Error> getVolumeAheadByOrderImpl(
+            SizedPricePool<M> const& pool, uint64_t orderID) const noexcept
+        {
+            auto it = orderToDetails_.find(orderID);
+            if (it == orderToDetails_.end()) [[unlikely]]
+            {
+                return std::unexpected(Error::MissingId);
+            }
+
+            auto [id, priceId] = it->second;
+            auto const& level = pool.pool[priceId];
+
+            uint64_t volume = 0;
+            for (auto const& [price, pId] : pool.levels)
+            {
+                if (price == level.price)
+                {
+                    break;
+                }
+                volume += pool.pool[pId].totalShares;
+            }
+
+            uint32_t currentId = level.head;
+            while (currentId != INVALID_ID && currentId != id)
+            {
+                Order const& o = orderPool_[currentId];
+                volume += o.shares;
+                currentId = o.next;
+            }
+            return quantity_t(volume);
         }
 
         void notifyTrade(uint64_t price, uint32_t quantity, Side side)
