@@ -34,6 +34,7 @@ set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
 set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(absl)
 
+add_subdirectory(deps/BppTree)
 
 add_library(alpbook)
 
@@ -49,7 +50,7 @@ target_sources(alpbook
         src/alpbook/internal.cppm
         src/alpbook/internal/pool.cppm
 )
-target_link_libraries(alpbook PRIVATE eve::eve absl::btree absl::flat_hash_map absl::numeric)
+target_link_libraries(alpbook PRIVATE eve::eve absl::flat_hash_map absl::numeric bpptree::bpptree)
 target_compile_features(alpbook PUBLIC cxx_std_23)
 
 if (ALPBOOK_BUILD_TESTS)

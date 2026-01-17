@@ -91,49 +91,29 @@ namespace alpbook::nasdaq
         }
 
         /// Returns the total buy volume strictly better than the given price.
-        /// The time complexity is O(N), where N is the number of price levels
-        /// better than targetPrice.
         [[nodiscard]] quantity_t getBuyVolumeAhead(price_t targetPrice) const noexcept
         {
-            uint64_t volume = 0;
-            for (auto const& [price, level] : bidLevels_)
-            {
-                if (price <= targetPrice)
-                {
-                    break;
-                }
-                volume += level.totalShares;
-            }
-            return quantity_t(volume);
+            auto it = bidLevels_.lower_bound(static_cast<uint64_t>(targetPrice));
+            return quantity_t(bidLevels_.sum_exclusive(it));
         }
 
         /// Returns the total sell volume strictly better than the given price.
-        /// The time complexity is O(N), where N is the number of price levels
-        /// better than targetPrice.
         [[nodiscard]] quantity_t getSellVolumeAhead(price_t targetPrice) const noexcept
         {
-            uint64_t volume = 0;
-            for (auto const& [price, level] : askLevels_)
-            {
-                if (price >= targetPrice)
-                {
-                    break;
-                }
-                volume += level.totalShares;
-            }
-            return quantity_t(volume);
+            auto it = askLevels_.lower_bound(static_cast<uint64_t>(targetPrice));
+            return quantity_t(askLevels_.sum_exclusive(it));
         }
 
-        /// Returns the total volume ahead of a specific order. Time complexity is O(N + M) where N
-        /// is the number of better price levels and M is the order's position in its queue.
+        /// Returns the total volume ahead of a specific order. Time complexity is O(log N + M)
+        /// where N is the number of price levels and M is the order's position in its queue.
         [[nodiscard]] std::expected<quantity_t, Error> getBuyVolumeAheadByOrder(
             uint64_t orderID) const noexcept
         {
             return getVolumeAheadByOrderImpl(bidLevels_, orderID);
         }
 
-        /// Returns the total volume ahead of a specific order. Time complexity is O(N + M) where N
-        /// is the number of better price levels and M is the order's position in its queue.
+        /// Returns the total volume ahead of a specific order. Time complexity is O(log N + M)
+        /// where N is the number of price levels and M is the order's position in its queue.
         [[nodiscard]] std::expected<quantity_t, Error> getSellVolumeAheadByOrder(
             uint64_t orderID) const noexcept
         {
@@ -225,8 +205,31 @@ namespace alpbook::nasdaq
             constexpr bool buySide = (S == Side::Buy);
             auto& levels = getLevels<S>();
 
-            PriceLevel& priceLevel = levels[price];  // Insert if not exists
-            priceLevel.totalShares += shares;
+            auto newId = orderPool_.allocate(timestamp, orderId, shares, INVALID_ID, INVALID_ID, S);
+
+            if (levels.contains(price))
+            {
+                levels.update_key(price,
+                                  [&](PriceLevel const& level)
+                                  {
+                                      PriceLevel updated = level;
+                                      updated.totalShares += shares;
+
+                                      // Link new order to end of queue
+                                      orderPool_[newId].prev = level.tail;
+                                      if (level.tail != INVALID_ID)
+                                      {
+                                          orderPool_[level.tail].next = newId;
+                                      }
+                                      updated.tail = newId;
+                                      return updated;
+                                  });
+            }
+            else
+            {
+                PriceLevel newLevel {.head = newId, .tail = newId, .totalShares = shares};
+                levels.insert_v(price, newLevel);
+            }
 
             Level& best = buySide ? bestBid_ : bestAsk_;
             if (price == best.price)
@@ -254,18 +257,6 @@ namespace alpbook::nasdaq
                 }
             }
 
-            auto newId = orderPool_.allocate(timestamp, orderId, shares, INVALID_ID, INVALID_ID, S);
-            if (priceLevel.tail == INVALID_ID)
-            {
-                priceLevel.head = newId;
-                priceLevel.tail = newId;
-            }
-            else
-            {
-                orderPool_[newId].prev = priceLevel.tail;
-                orderPool_[priceLevel.tail].next = newId;
-                priceLevel.tail = newId;
-            }
             orderToDetails_[orderId] = {.orderId = newId, .price = price};
         }
 
@@ -303,8 +294,16 @@ namespace alpbook::nasdaq
                 return;
             }
             o.shares -= shares;
-            auto& level = levels[price];
-            level.totalShares -= shares;
+
+            uint32_t newTotalShares = 0;
+            levels.update_key(price,
+                              [&](PriceLevel const& level)
+                              {
+                                  PriceLevel updated = level;
+                                  updated.totalShares -= shares;
+                                  newTotalShares = updated.totalShares;
+                                  return updated;
+                              });
 
             if constexpr (std::is_same_v<Tag, TagExecute>)
             {
@@ -314,7 +313,7 @@ namespace alpbook::nasdaq
             Level& best = buySide ? bestBid_ : bestAsk_;
             if (o.shares > 0 && price == best.price)
             {
-                best.quantity = level.totalShares;
+                best.quantity = newTotalShares;
                 if constexpr (buySide)
                 {
                     listener_->onTopBidChange(best.price, best.quantity);
@@ -332,38 +331,33 @@ namespace alpbook::nasdaq
             constexpr bool buySide = (S == Side::Buy);
             auto& levels = getLevels<S>();
 
-            auto& priceLevel = levels[price];
             if constexpr (std::is_same_v<Tag, TagExecute>)
             {
                 notifyTrade(price, o.shares, S);
             }
 
-            if (o.prev == INVALID_ID)  // i.e. we are the head
-            {
-                priceLevel.head = o.next;
-            }
-            else
+            if (o.prev != INVALID_ID)
             {
                 orderPool_[o.prev].next = o.next;
             }
-
-            if (o.next == INVALID_ID)
-            {
-                priceLevel.tail = o.prev;
-            }
-            else
+            if (o.next != INVALID_ID)
             {
                 orderPool_[o.next].prev = o.prev;
             }
             orderPool_.deallocate(id);
             orderToDetails_.erase(o.id);
 
-            priceLevel.totalShares -= o.shares;
+            // Get current level info to determine if we should erase or update
+            auto it = levels.find(price);
+            uint32_t oldTotal = it->second.totalShares;
+            uint32_t newTotal = oldTotal - o.shares;
+
             Level& best = buySide ? bestBid_ : bestAsk_;
             bool wasTop = (price == best.price);
-            if (priceLevel.totalShares == 0)
+
+            if (newTotal == 0)
             {
-                levels.erase(price);
+                levels.erase_key(price);
 
                 if (wasTop)
                 {
@@ -378,17 +372,36 @@ namespace alpbook::nasdaq
                     }
                 }
             }
-            else if (wasTop)
+            else
             {
-                // Volume changed
-                best.quantity = priceLevel.totalShares;
-                if constexpr (buySide)
+                // Update level with new total and updated head/tail pointers
+                levels.update_key(price,
+                                  [&](PriceLevel const& level)
+                                  {
+                                      PriceLevel updated = level;
+                                      updated.totalShares = newTotal;
+                                      if (o.prev == INVALID_ID)  // was head
+                                      {
+                                          updated.head = o.next;
+                                      }
+                                      if (o.next == INVALID_ID)  // was tail
+                                      {
+                                          updated.tail = o.prev;
+                                      }
+                                      return updated;
+                                  });
+
+                if (wasTop)
                 {
-                    listener_->onTopBidChange(best.price, best.quantity);
-                }
-                else
-                {
-                    listener_->onTopAskChange(best.price, best.quantity);
+                    best.quantity = newTotal;
+                    if constexpr (buySide)
+                    {
+                        listener_->onTopBidChange(best.price, best.quantity);
+                    }
+                    else
+                    {
+                        listener_->onTopAskChange(best.price, best.quantity);
+                    }
                 }
             }
         }
@@ -441,15 +454,7 @@ namespace alpbook::nasdaq
             }
             auto const& level = levelIt->second;
 
-            uint64_t volume = 0;
-            for (auto const& [price, lvl] : levels)
-            {
-                if (price == orderPrice)
-                {
-                    break;
-                }
-                volume += lvl.totalShares;
-            }
+            uint64_t volume = levels.sum_exclusive(levelIt);
 
             uint32_t currentId = level.head;
             while (currentId != INVALID_ID && currentId != id)
