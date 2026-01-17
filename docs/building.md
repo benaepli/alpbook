@@ -2,80 +2,56 @@
 
 ## Dependency Management
 
-This project requires Conan 2 for dependency management. The list of dependencies can be found in
-[conanfile.py](../conanfile.py).
-
-To install conan, see the [Conan documentation](https://docs.conan.io/2/installation.html). You will need to create a
-Conan profile. You can start by detecting your default host profile:
-
-```bash
-conan profile detect --force
-```
-
-This creates a profile at `~/.conan2/profiles/default`. You can edit this file to match your system's configuration. For
-example, I use a custom profile named `clangdebug` with the following contents:
-
-```
-[settings]
-arch=x86_64
-build_type=Debug
-compiler=clang
-compiler.cppstd=gnu23
-compiler.version=20
-compiler.libcxx=libstdc++
-os=Linux
-
-[conf]
-tools.build:compiler_executables={"c": "/usr/bin/clang", "cpp": "/usr/bin/clang++"}
-```
-
-Then, to install dependencies, run
-`conan install . --build=missing -pr:h=clangdebug -pr:b=clangdebug`.
-
-This will generate a `conan_toolchain.cmake` somewhere in the `build` directory.
+This project uses `FetchContent` to manage dependencies. 
 
 ## Building
 
-`CMakePresets.json` contains a preset for building with conan. To use it, run:
+`CMakePresets.json` contains a preset for building with clang. To use it, run:
 
 ```bash
-cmake --preset conan
+cmake --preset included
 cmake --build build
 ```
 
 You can also configure a `CMakeUserPresets.json` file to set additional options and override the toolchain file. For
-example, with my Conan debug profile:
+example, with my debug profile:
 
 ```json
 {
   "version": 3,
   "configurePresets": [
     {
-      "name": "conan-local",
-      "inherits": "conan",
-      "toolchainFile": "${sourceDir}/build/Debug/generators/conan_toolchain.cmake"
+      "name": "local",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     }
   ]
 }
 ```
 
-Then, we can simply switch to the `conan-local` preset and build.
+Then, we can simply switch to the `local` preset and build.
 
 This project has been tested with Clang 20 and GCC 14. It should build with MSVC, but I have not tested it.
 
 ## C++ Modules
 
-This project uses C++23 modules. The `alpmap` library is implemented as a single module.
+This project uses C++23 modules. The alpbook library is implemented as a single module.
 
 ### Module Usage
 
 In your code, import the module instead of including headers:
 
 ```cpp
-import alpmap;  // Import the module
+import alpbook;  // Import the module
 
 int main() {
-    // Use alpmap functionality
+    // Use alpbook functionality
 }
 ```
 

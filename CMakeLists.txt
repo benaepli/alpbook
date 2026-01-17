@@ -11,9 +11,6 @@ option(ALPBOOK_BUILD_TESTS "Build test programs" ON)
 option(ALPBOOK_BUILD_BENCHMARKS "Build benchmark programs" OFF)
 option(ALPBOOK_BUILD_DOCS "Build Doxygen documentation" ON)
 
-
-option(ALP_USE_EXPERIMENTAL_SIMD "Use std::experimental::simd" OFF)
-
 include(FetchContent)
 set(EVE_BUILD_DOCUMENTATION OFF)
 set(EVE_BUILD_BENCHMARKS OFF)
@@ -26,6 +23,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(eve)
 
+FetchContent_Declare(
+        absl
+        GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+        GIT_TAG 20240116.2
+)
+set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ABSL_BUILD_MONOLITHIC_TESTS OFF CACHE BOOL "" FORCE)
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(absl)
+
 
 add_library(alpbook)
 
@@ -33,8 +41,15 @@ target_sources(alpbook
         PUBLIC
         FILE_SET CXX_MODULES FILES
         src/alpbook.cppm
+        src/alpbook/book.cppm
+        src/alpbook/book/core.cppm
+        src/alpbook/book/nasdaq.cppm
+        src/alpbook/book/nasdaq-state.cppm
+        src/alpbook/common.cppm
+        src/alpbook/internal.cppm
+        src/alpbook/internal/pool.cppm
 )
-target_link_libraries(alpbook PRIVATE eve::eve)
+target_link_libraries(alpbook PRIVATE eve::eve absl::btree absl::flat_hash_map absl::numeric)
 target_compile_features(alpbook PUBLIC cxx_std_23)
 
 if (ALPBOOK_BUILD_TESTS)
@@ -43,7 +58,7 @@ if (ALPBOOK_BUILD_TESTS)
 endif ()
 
 if (ALPBOOK_BUILD_BENCHMARKS)
-#    add_subdirectory(benchmarks)
+    #    add_subdirectory(benchmarks)
 endif ()
 
 if (ALPBOOK_BUILD_DOCS)

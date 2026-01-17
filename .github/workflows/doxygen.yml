@@ -30,7 +30,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset=ci
+          cmake --preset=included
 
       - name: Build Doxygen documentation
         run: |
