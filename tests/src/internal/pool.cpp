@@ -92,12 +92,10 @@ struct ComplexObject
 {
     int a;
     double b;
-    std::string c;
 
-    ComplexObject(int a, double b, std::string c)
+    ComplexObject(int a, double b)
         : a(a)
         , b(b)
-        , c(std::move(c))
     {
     }
 };
@@ -106,11 +104,7 @@ TEST(ObjectPoolTest, PerfectForwarding)
 {
     ObjectPool<ComplexObject> pool;
 
-    std::string str = "hello";
-    auto idx = pool.allocate(42, 3.14, std::move(str));
-
+    auto idx = pool.allocate(42, 3.14);
     EXPECT_EQ(pool[idx].a, 42);
     EXPECT_EQ(pool[idx].b, 3.14);
-    EXPECT_EQ(pool[idx].c, "hello");
-    EXPECT_TRUE(str.empty());  // Verify move occurred
 }

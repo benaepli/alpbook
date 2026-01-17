@@ -15,7 +15,8 @@ export namespace alpbook::internal
     /// but the returned identifiers are. Objects are constructed with
     /// provided arguments using perfect forwarding.
     /// Objects must be trivially relocatable and trivially destructible.
-    template<typename T> requires std::is_trivially_destructible_v<T>
+    template<typename T>
+        requires std::is_trivially_destructible_v<T>
     class ObjectPool
     {
       public:
