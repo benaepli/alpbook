@@ -18,7 +18,7 @@ namespace alpbook
     };
 
     export template<typename T>
-    concept Book = requires(T b, int depth, price_t targetPrice) {
+    concept Book = requires(T b, int depth, price_t targetPrice) { 
         { b.getBestBid() } -> std::same_as<Level>;
         { b.getBestAsk() } -> std::same_as<Level>;
         { b.getBidLevel(depth) } -> std::same_as<Level>;
