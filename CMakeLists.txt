@@ -59,7 +59,7 @@ if (ALPBOOK_BUILD_TESTS)
 endif ()
 
 if (ALPBOOK_BUILD_BENCHMARKS)
-    #    add_subdirectory(benchmarks)
+    add_subdirectory(benchmarks)
 endif ()
 
 if (ALPBOOK_BUILD_DOCS)

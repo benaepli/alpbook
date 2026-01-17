@@ -63,8 +63,20 @@ export namespace alpbook::internal
             firstFree_ = index;
         }
 
-        T& operator[](int index) noexcept { return slots_[index].data; }
-        T const& operator[](int index) const noexcept { return slots_[index].data; }
+        void reset() noexcept
+        {
+            auto size = static_cast<uint32_t>(slots_.size());
+            firstFree_ = 0;
+
+            // Rebuild free list: each slot points to the next
+            for (uint32_t i = 0; i < size; i++)
+            {
+                slots_[i].nextFree = i + 1;
+            }
+        }
+
+        T& operator[](uint32_t index) noexcept { return slots_[index].data; }
+        T const& operator[](uint32_t index) const noexcept { return slots_[index].data; }
 
       private:
         union Slot

@@ -73,6 +73,16 @@ namespace alpbook::nasdaq
 
         void setListener(L& listener) noexcept { listener_ = &listener; }
 
+        void reset() noexcept
+        {
+            bidLevels_.clear();
+            askLevels_.clear();
+            orderToDetails_.clear();
+            orderPool_.reset();
+            bestBid_ = {};
+            bestAsk_ = {};
+        }
+
         [[nodiscard]] Level getBestBid() const noexcept { return bestBid_; }
         [[nodiscard]] Level getBestAsk() const noexcept { return bestAsk_; }
 
@@ -344,8 +354,6 @@ namespace alpbook::nasdaq
             {
                 orderPool_[o.next].prev = o.prev;
             }
-            orderPool_.deallocate(id);
-            orderToDetails_.erase(o.id);
 
             // Get current level info to determine if we should erase or update
             auto it = levels.find(price);
@@ -404,6 +412,9 @@ namespace alpbook::nasdaq
                     }
                 }
             }
+
+            orderPool_.deallocate(id);
+            orderToDetails_.erase(o.id);
         }
 
         template<typename M>
