@@ -13,19 +13,18 @@ export module alpbook.dispatch;
 
 namespace alpbook
 {
-    export template<size_t SlotSize>
-    struct alignas(std::hardware_destructive_interference_size) MsgSlot
-    {
-        std::array<uint8_t, SlotSize> data;
-    };
+    export template<typename T>
+    concept DispatchSlot = std::is_trivially_copyable_v<T>
+        && (sizeof(T) % std::hardware_destructive_interference_size == 0)
+        && (alignof(T) == std::hardware_destructive_interference_size);
 
-    export template<size_t SlotSize, typename T>
-    concept PacketSink = requires(T worker, MsgSlot<SlotSize> data) {
+    export template<typename Slot, typename T>
+    concept PacketSink = DispatchSlot<Slot> && requires(T worker, Slot data) {
         { worker.onMessage(data) } -> std::same_as<void>;
     };
 
-    export template<size_t SlotSize, typename T>
-    concept IDExtractor = requires(MsgSlot<SlotSize> const& slot) {
+    export template<typename Slot, typename T>
+    concept IDExtractor = DispatchSlot<Slot> && requires(Slot const& slot) {
         { T::extractID(slot) } -> std::convertible_to<uint16_t>;
     };
 
@@ -36,15 +35,15 @@ namespace alpbook
     };
 
     /// A factory for PacketSink. It must be thread-safe.
-    export template<typename F, size_t SlotSize, typename Mapper>
-    concept SinkFactory =
-        std::copy_constructible<F> && requires(F factory, uint32_t core, Mapper const& m) {
-            typename F::SinkType;
-            { factory.create(core, m) } -> std::same_as<typename F::SinkType>;
-            requires PacketSink<SlotSize, typename F::SinkType>;
-        };
+    export template<typename F, typename Slot, typename Mapper>
+    concept SinkFactory = DispatchSlot<Slot> && std::copy_constructible<F>
+        && requires(F factory, uint32_t core, Mapper const& m) {
+               typename F::SinkType;
+               { factory.create(core, m) } -> std::same_as<typename F::SinkType>;
+               requires PacketSink<Slot, typename F::SinkType>;
+           };
 
-    template<typename T, typename IdType = uint16_t>
+    export template<typename T, typename IdType = uint16_t>
     concept EnumerableMapper = IDMapper<T, IdType> && requires(T mapper, uint32_t core) {
         { mapper.getIDsForThread(core) } -> std::same_as<std::vector<IdType>>;
     };
@@ -56,8 +55,9 @@ namespace alpbook
 
     /// Dispatches messages to workers based on templated policies.
     /// Thread counts are guaranteed to be a power of 2.
-    export template<size_t SlotSize, typename F, typename E, typename M>
-        requires SinkFactory<F, SlotSize, M> && IDExtractor<SlotSize, E> && IDMapper<M>
+    export template<typename Slot, typename F, typename E, typename M>
+        requires DispatchSlot<Slot> && SinkFactory<F, Slot, M> && IDExtractor<Slot, E>
+        && IDMapper<M>
     class Dispatcher
     {
         using Sink = F::SinkType;
@@ -117,7 +117,9 @@ namespace alpbook
 
             cores = std::bit_floor(cores);
             if (cores == 0)
+            {
                 cores = 1;
+            }
 
             mapper_->setThreadCount(cores);
 
@@ -138,7 +140,7 @@ namespace alpbook
         }
 
         /// Extracts the ID and routes the message to the correct worker queue.
-        void dispatch(MsgSlot<SlotSize> const& slot)
+        void dispatch(Slot const& slot)
         {
             uint16_t id = E::extractID(slot);
             uint32_t threadIdx = mapper_->getWorkerIndex(id);
@@ -163,7 +165,7 @@ namespace alpbook
 
             while (running.load(std::memory_order_relaxed))
             {
-                MsgSlot<SlotSize> slot;
+                Slot slot;
                 if (queue.try_dequeue(slot))
                 {
                     sink.onMessage(slot);
@@ -186,7 +188,7 @@ namespace alpbook
             std::atomic<bool> running {false};
 
             alignas(std::hardware_destructive_interference_size)
-                moodycamel::ReaderWriterQueue<MsgSlot<SlotSize>> queue;
+                moodycamel::ReaderWriterQueue<Slot> queue;
             std::thread thread;
         };
         std::vector<std::unique_ptr<Worker>> workers_ {};

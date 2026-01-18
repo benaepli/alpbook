@@ -132,7 +132,7 @@ namespace alpbook::nasdaq
 
         /// Returns the total volume ahead of a specific order. Time complexity is O(log N + M)
         /// where N is the number of price levels and M is the order's position in its queue.
-        [[nodiscard]] std::expected<quantity_t, Error> getBuyVolumeAheadByOrder(
+        [[nodiscard]] std::expected<quantity_t, BookError> getBuyVolumeAheadByOrder(
             uint64_t orderID) const noexcept
         {
             return getVolumeAheadByOrderImpl(bidLevels_, orderID);
@@ -140,7 +140,7 @@ namespace alpbook::nasdaq
 
         /// Returns the total volume ahead of a specific order. Time complexity is O(log N + M)
         /// where N is the number of price levels and M is the order's position in its queue.
-        [[nodiscard]] std::expected<quantity_t, Error> getSellVolumeAheadByOrder(
+        [[nodiscard]] std::expected<quantity_t, BookError> getSellVolumeAheadByOrder(
             uint64_t orderID) const noexcept
         {
             return getVolumeAheadByOrderImpl(askLevels_, orderID);
@@ -158,20 +158,20 @@ namespace alpbook::nasdaq
             }
         }
 
-        std::expected<void, Error> execute(ExecuteOrder order)
+        std::expected<void, BookError> execute(ExecuteOrder order)
         {
             return decrementImpl(order.id, order.shares, TagExecute {});
         }
-        std::expected<void, Error> reduce(DecrementShares order)
+        std::expected<void, BookError> reduce(DecrementShares order)
         {
             return decrementImpl(order.id, order.shares, TagChange {});
         }
-        std::expected<void, Error> cancel(CancelOrder order)
+        std::expected<void, BookError> cancel(CancelOrder order)
         {
             auto it = orderToDetails_.find(order.id);
             if (it == orderToDetails_.end()) [[unlikely]]
             {
-                return std::unexpected(Error::MissingId);
+                return std::unexpected(BookError::MissingId);
             }
             auto [id, price] = it->second;
             Order& o = orderPool_[id];
@@ -189,12 +189,12 @@ namespace alpbook::nasdaq
 
         /// Replace is equivalent to cancelling an order and inserting a new one.
         /// Replaced orders lose time priority.
-        std::expected<void, Error> replace(ReplaceOrder order)
+        std::expected<void, BookError> replace(ReplaceOrder order)
         {
             auto it = orderToDetails_.find(order.oldId);
             if (it == orderToDetails_.end()) [[unlikely]]
             {
-                return std::unexpected(Error::MissingId);
+                return std::unexpected(BookError::MissingId);
             }
             auto [id, price] = it->second;
             Order o = std::move(orderPool_[id]);
@@ -287,12 +287,12 @@ namespace alpbook::nasdaq
         }
 
         template<typename Tag>
-        std::expected<void, Error> decrementImpl(uint64_t orderId, uint32_t shares, Tag tag)
+        std::expected<void, BookError> decrementImpl(uint64_t orderId, uint32_t shares, Tag tag)
         {
             auto it = orderToDetails_.find(orderId);
             if (it == orderToDetails_.end()) [[unlikely]]
             {
-                return std::unexpected(Error::MissingId);
+                return std::unexpected(BookError::MissingId);
             }
             auto [id, price] = it->second;
             Order& o = orderPool_[id];
@@ -464,20 +464,20 @@ namespace alpbook::nasdaq
         }
 
         template<typename M>
-        [[nodiscard]] std::expected<quantity_t, Error> getVolumeAheadByOrderImpl(
+        [[nodiscard]] std::expected<quantity_t, BookError> getVolumeAheadByOrderImpl(
             M const& levels, uint64_t orderID) const noexcept
         {
             auto it = orderToDetails_.find(orderID);
             if (it == orderToDetails_.end()) [[unlikely]]
             {
-                return std::unexpected(Error::MissingId);
+                return std::unexpected(BookError::MissingId);
             }
 
             auto [id, orderPrice] = it->second;
             auto levelIt = levels.find(orderPrice);
             if (levelIt == levels.end()) [[unlikely]]
             {
-                return std::unexpected(Error::MissingId);
+                return std::unexpected(BookError::MissingId);
             }
             auto const& level = levelIt->second;
 

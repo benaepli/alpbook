@@ -15,12 +15,17 @@ namespace
 {
     constexpr size_t TestSlotSize = 64;
 
+    struct alignas(std::hardware_destructive_interference_size) TestSlot
+    {
+        std::array<uint8_t, TestSlotSize> data;
+    };
+
     struct MockSink
     {
         std::atomic<uint32_t>& messageCount;
         uint32_t lastId = 0;
 
-        void onMessage(MsgSlot<TestSlotSize> data)
+        void onMessage(TestSlot data)
         {
             lastId = *reinterpret_cast<uint16_t*>(data.data.data()); // Assume ID is at the start
             messageCount.fetch_add(1, std::memory_order_relaxed);
@@ -56,11 +61,15 @@ namespace
 
     struct MockExtractor
     {
-        static uint16_t extractID(MsgSlot<TestSlotSize> const& slot)
+        static uint16_t extractID(TestSlot const& slot)
         {
             return *reinterpret_cast<uint16_t const*>(slot.data.data());
         }
     };
+
+    static_assert(DispatchSlot<TestSlot>);
+    static_assert(PacketSink<TestSlot, MockSink>);
+    static_assert(IDExtractor<TestSlot, MockExtractor>);
 }
 
 class DispatcherTest : public ::testing::Test
@@ -86,7 +95,7 @@ class DispatcherTest : public ::testing::Test
 
 TEST_F(DispatcherTest, Initialization)
 {
-    Dispatcher<TestSlotSize, MockFactory, MockExtractor, MockMapper> dispatcher(mapper, factory);
+    Dispatcher<TestSlot, MockFactory, MockExtractor, MockMapper> dispatcher(mapper, factory);
 
     auto result = dispatcher.init(2);
     if (!result.has_value())
@@ -101,7 +110,7 @@ TEST_F(DispatcherTest, Initialization)
 
 TEST_F(DispatcherTest, DispatchMessages)
 {
-    Dispatcher<TestSlotSize, MockFactory, MockExtractor, MockMapper> dispatcher(mapper, factory);
+    Dispatcher<TestSlot, MockFactory, MockExtractor, MockMapper> dispatcher(mapper, factory);
 
     auto result = dispatcher.init(4);
     if (!result.has_value())
@@ -114,7 +123,7 @@ TEST_F(DispatcherTest, DispatchMessages)
 
 TEST_F(DispatcherTest, DispatchCorrectRouting)
 {
-    Dispatcher<TestSlotSize, MockFactory, MockExtractor, MockMapper> dispatcher(mapper, factory);
+    Dispatcher<TestSlot, MockFactory, MockExtractor, MockMapper> dispatcher(mapper, factory);
 
     auto result = dispatcher.init(2);
     if (!result.has_value())
@@ -128,7 +137,7 @@ TEST_F(DispatcherTest, DispatchCorrectRouting)
     uint32_t const msgsPerThread = 100;
     for (uint32_t i = 0; i < threadCount * msgsPerThread; ++i)
     {
-        MsgSlot<TestSlotSize> slot;
+        TestSlot slot;
         *reinterpret_cast<uint16_t*>(slot.data.data()) = static_cast<uint16_t>(i);
         dispatcher.dispatch(slot);
     }
@@ -159,7 +168,7 @@ TEST_F(DispatcherTest, DispatchCorrectRouting)
 
 TEST_F(DispatcherTest, DropMessages)
 {
-    Dispatcher<TestSlotSize, MockFactory, MockExtractor, MockMapper> dispatcher(mapper, factory);
+    Dispatcher<TestSlot, MockFactory, MockExtractor, MockMapper> dispatcher(mapper, factory);
 
     auto result = dispatcher.init(2);
     if (!result.has_value())
@@ -170,7 +179,7 @@ TEST_F(DispatcherTest, DropMessages)
     resetCounters();
 
     // 0xFFFF is DROP_MSG
-    MsgSlot<TestSlotSize> slot;
+    TestSlot slot;
     *reinterpret_cast<uint16_t*>(slot.data.data()) = 0xFFFF;
     dispatcher.dispatch(slot);
 

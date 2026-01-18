@@ -8,7 +8,7 @@ import alpbook.book.nasdaq;
 import alpbook.book.core;
 import alpbook.common;
 
-using alpbook::Error;
+using alpbook::BookError;
 using alpbook::Level;
 using alpbook::price_t;
 using alpbook::quantity_t;
@@ -278,7 +278,7 @@ TEST_F(NasdaqBookTest, ExecuteInvalidOrderId)
     auto result = book->execute(ExecuteOrder {99999, 10});
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Error::MissingId);
+    EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
 TEST_F(NasdaqBookTest, ExecuteUpdatesTopOfBook)
@@ -325,7 +325,7 @@ TEST_F(NasdaqBookTest, CancelInvalidId)
     auto result = book->cancel(CancelOrder {99999});
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Error::MissingId);
+    EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
 TEST_F(NasdaqBookTest, CancelUpdatesTopOfBook)
@@ -475,7 +475,7 @@ TEST_F(NasdaqBookTest, ReduceWithInvalidId)
     auto result = book->reduce(DecrementShares {99999, 10});
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Error::MissingId);
+    EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
 TEST_F(NasdaqBookTest, ReplaceAtSamePriceLosesTimePriority)
@@ -527,7 +527,7 @@ TEST_F(NasdaqBookTest, ReplaceWithInvalidId)
     auto result = book->replace(ReplaceOrder {2000, 99999, 5000, 101, 40});
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Error::MissingId);
+    EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
 TEST_F(NasdaqBookTest, GetBuyVolumeAheadWithMultiplePriceLevels)
@@ -589,7 +589,7 @@ TEST_F(NasdaqBookTest, VolumeQueryWithInvalidOrderId)
     auto result = book->getBuyVolumeAheadByOrder(99999);
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Error::MissingId);
+    EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
 TEST_F(NasdaqBookTest, GetBidLevelAtVariousDepths)

@@ -11,7 +11,7 @@ export module alpbook.book.core;
 
 namespace alpbook
 {
-    export enum class Error : uint8_t
+    export enum class BookError : uint8_t
     {
         MissingId,
     };
@@ -36,7 +36,7 @@ namespace alpbook
 
     export template<typename T>
     concept ExtendedBook = Book<T> && requires(T b, uint64_t orderID) {
-        { b.getBuyVolumeAheadByOrder(orderID) } -> std::same_as<std::expected<quantity_t, Error>>;
-        { b.getSellVolumeAheadByOrder(orderID) } -> std::same_as<std::expected<quantity_t, Error>>;
+        { b.getBuyVolumeAheadByOrder(orderID) } -> std::same_as<std::expected<quantity_t, BookError>>;
+        { b.getSellVolumeAheadByOrder(orderID) } -> std::same_as<std::expected<quantity_t, BookError>>;
     };
 }  // namespace alpbook

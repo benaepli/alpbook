@@ -17,9 +17,10 @@ export import :listener;
 
 namespace alpbook::itch
 {
-    constexpr auto MESSAGE_SLOT_SIZE = 64;
-
-    using ItchSlot = MsgSlot<MESSAGE_SLOT_SIZE>;
+    export struct alignas(std::hardware_destructive_interference_size) ItchSlot
+    {
+        std::array<uint8_t, 64> data;
+    };
 
     template<typename T>
         requires std::is_integral_v<T>
@@ -34,6 +35,9 @@ namespace alpbook::itch
     {
         static uint16_t extractID(ItchSlot const& msg) { return parseField<uint16_t>(msg, 1); }
     };
+
+    static_assert(DispatchSlot<ItchSlot>);
+    static_assert(IDExtractor<ItchSlot, ItchExtractor>);
 
     inline uint64_t parseTimestamp(ItchSlot const& msg)
     {

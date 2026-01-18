@@ -75,6 +75,7 @@ target_sources(alpbook
         src/alpbook/itch/dispatch.cppm
         src/alpbook/itch/parsing.cppm
         src/alpbook/itch/parsing-listener.cppm
+        src/alpbook/sink/nasdaq.cppm
         src/alpbook/strategy.cppm
 )
 target_link_libraries(alpbook PRIVATE eve::eve absl::flat_hash_map absl::numeric bpptree::bpptree hwloc readerwriterqueue)
