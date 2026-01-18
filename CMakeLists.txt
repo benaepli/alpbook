@@ -66,12 +66,16 @@ target_sources(alpbook
         src/alpbook/book/nasdaq.cppm
         src/alpbook/book/nasdaq-state.cppm
         src/alpbook/common.cppm
+        src/alpbook/dispatch.cppm
         src/alpbook/internal.cppm
         src/alpbook/internal/backoff.cppm
         src/alpbook/internal/pin.cppm
         src/alpbook/internal/pool.cppm
         src/alpbook/itch.cppm
         src/alpbook/itch/dispatch.cppm
+        src/alpbook/itch/parsing.cppm
+        src/alpbook/itch/parsing-listener.cppm
+        src/alpbook/strategy.cppm
 )
 target_link_libraries(alpbook PRIVATE eve::eve absl::flat_hash_map absl::numeric bpptree::bpptree hwloc readerwriterqueue)
 target_compile_features(alpbook PUBLIC cxx_std_23)

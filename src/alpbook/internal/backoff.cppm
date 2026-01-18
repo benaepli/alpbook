@@ -14,7 +14,7 @@ export namespace alpbook::internal
     template<uint32_t BusyLimit,
              uint32_t SpinLimit,
              uint32_t YieldLimit = std::numeric_limits<uint32_t>::max(),
-             std::chrono::duration WaitDuration = std::chrono::microseconds(1)>
+             size_t WaitNanoseconds = 1000>
     class Backoff
     {
         uint32_t count = 0;
@@ -40,7 +40,7 @@ export namespace alpbook::internal
             }
             else
             {
-                std::this_thread::sleep_for(WaitDuration);
+                std::this_thread::sleep_for(std::chrono::nanoseconds(WaitNanoseconds));
             }
             count++;
         }
