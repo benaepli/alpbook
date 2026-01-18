@@ -36,15 +36,16 @@ namespace detail {
  */
 template <
     typename Value,
-    int leaf_node_bytes = 512,
-    int internal_node_bytes = 512,
-    int depth_limit = 16,
-    bool disable_exceptions = true,
+    int leaf_node_bytes,
+    int internal_node_bytes,
+    int depth_limit,
+    bool disable_exceptions,
+    typename Allocator,
     typename... Ts>
 class BppTreeDetail {
 private:
 
-    using NodeTypes = NodeTypesDetail<Value, leaf_node_bytes, internal_node_bytes, depth_limit, disable_exceptions, Ts...>;
+    using NodeTypes = NodeTypesDetail<Value, Allocator, leaf_node_bytes, internal_node_bytes, depth_limit, disable_exceptions, Ts...>;
 
     static constexpr int leaf_node_size = NodeTypes::leaf_node_size;
 
@@ -67,12 +68,17 @@ public:
     protected:
         RootType root_variant;
         size_t tree_size;
+        [[no_unique_address]] Allocator alloc;
 
-        Shared() : Parent(), root_variant(make_ptr<LeafNode>()), tree_size(0) {}
+        Shared(Allocator const& alloc = Allocator()) : Parent(alloc), root_variant(allocate_node<LeafNode>(alloc)), tree_size(0), alloc(alloc) {}
 
-        Shared(RootType const& root_variant, size_t size) : Parent(), root_variant(root_variant), tree_size(size) {}
+        Shared(RootType const& root_variant, size_t size, Allocator const& alloc = Allocator()) : Parent(alloc), root_variant(root_variant), tree_size(size), alloc(alloc) {}
 
-        Shared(RootType&& root_variant, size_t size) : Parent(), root_variant(std::move(root_variant)), tree_size(size) {}
+        Shared(RootType&& root_variant, size_t size, Allocator const& alloc = Allocator()) : Parent(alloc), root_variant(std::move(root_variant)), tree_size(size), alloc(alloc) {}
+
+        Allocator const& get_allocator() const {
+            return alloc;
+        }
 
         using Modifiers = ModifyTypes<LeafNode, InternalNode, max_depth_v>;
 
@@ -243,12 +249,14 @@ public:
         template <typename... Us>
         explicit Transient(Us&&... us) : Parent(std::forward<Us>(us)...) {}
 
+        explicit Transient(Allocator const& alloc) : Parent(alloc) {}
+
         [[nodiscard]] Persistent persistent() const& {
-            return Persistent(this->root_variant, this->tree_size);
+            return Persistent(this->root_variant, this->tree_size, this->alloc);
         }
 
         [[nodiscard]] Persistent persistent() && {
-            return Persistent(std::move(this->root_variant), this->tree_size);
+            return Persistent(std::move(this->root_variant), this->tree_size, this->alloc);
         }
 
     private:
@@ -327,7 +335,7 @@ public:
         }
 
         void clear() {
-            this->self().root_variant = make_ptr<LeafNode>();
+            this->self().root_variant = allocate_node<LeafNode>(this->alloc);
             this->tree_size = 0;
             this->mod_count++;
         }
@@ -345,11 +353,11 @@ public:
         }
 
         [[nodiscard]] Transient transient() const& {
-            return Transient(this->root_variant, this->tree_size);
+            return Transient(this->root_variant, this->tree_size, this->alloc);
         }
 
         [[nodiscard]] Transient transient() && {
-            return Transient(std::move(this->root_variant), this->tree_size);
+            return Transient(std::move(this->root_variant), this->tree_size, this->alloc);
         }
 
         template <typename It, typename... Args>
@@ -418,10 +426,10 @@ public:
     };
 };
 
-template <typename Value, int leaf_node_bytes = 512, int internal_node_bytes = 512, int depth_limit = 16, bool disable_exceptions = default_disable_exceptions>
+template <typename Value, int leaf_node_bytes = 512, int internal_node_bytes = 512, int depth_limit = 16, bool disable_exceptions = default_disable_exceptions, typename Allocator = std::allocator<Value>>
 struct BppTree {
     template <typename... Args>
-    using mixins = BppTreeDetail<Value, leaf_node_bytes, internal_node_bytes, depth_limit, disable_exceptions, typename Args::template build<Value>...>;
+    using mixins = BppTreeDetail<Value, leaf_node_bytes, internal_node_bytes, depth_limit, disable_exceptions, Allocator, typename Args::template build<Value>...>;
 
     using Transient = typename mixins<>::Transient;
 

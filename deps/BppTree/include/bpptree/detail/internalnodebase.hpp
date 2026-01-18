@@ -12,7 +12,7 @@
 
 namespace bpptree::detail {
 
-template <typename Parent, typename Value, auto leaf_size, auto internal_size, auto depth_v, bool disable_exceptions>
+template <typename Parent, typename Value, typename Allocator, auto leaf_size, auto internal_size, auto depth_v, bool disable_exceptions>
 struct InternalNodeBase : public Parent {
 
     static constexpr int depth = depth_v;
@@ -42,6 +42,18 @@ struct InternalNodeBase : public Parent {
 
     NodePtr<ChildType> pointers[internal_size]{};
 
+    InternalNodeBase() = default;
+
+    InternalNodeBase(InternalNodeBase const& other) = delete;
+
+    InternalNodeBase(Allocator const& alloc) : Parent(alloc) {}
+
+    InternalNodeBase(InternalNodeBase const& other, Allocator const& alloc) : Parent(other, alloc) {
+        for (IndexType i = 0; i < other.length; ++i) {
+            pointers[i] = other.pointers[i];
+        }
+    }
+
     void prefetch_children(bool condition) {
         if (condition) {
             for (IndexType i = 0; i < this->length; ++i) {
@@ -55,7 +67,7 @@ struct InternalNodeBase : public Parent {
     }
 
     static IndexType get_index(uint64_t it) {
-        return (it >> it_shift) & it_mask;
+        return static_cast<IndexType>((it >> it_shift) & it_mask);
     }
 
     static void clear_index(uint64_t& it) {
@@ -149,7 +161,7 @@ struct InternalNodeBase : public Parent {
         set_index(iter, !replace.carry ? index : result.carry ? 0 : index + 1);
         compute_delta_replace(replace.delta, result.delta, index);
         if (this->persistent) {
-            result.delta.ptr = make_ptr<NodeType>(this->self());
+            result.delta.ptr = allocate_node<NodeType>(this->alloc, this->self());
             result.delta.ptr->replace_element(index, replace.delta);
             result.delta.ptr_changed = true;
             do_replace(result);
@@ -257,7 +269,7 @@ struct InternalNodeBase : public Parent {
             ReplaceType<NodeType> replace{};
             compute_delta_split(split, replace.delta, index);
             if (this->persistent) {
-                replace.delta.ptr = make_ptr<NodeType>();
+                replace.delta.ptr = allocate_node<NodeType>(this->alloc);
                 insert_split_replace(*replace.delta.ptr, index, split);
                 replace.delta.ptr_changed = true;
                 do_replace(replace);
@@ -266,9 +278,9 @@ struct InternalNodeBase : public Parent {
                 do_replace(replace);
             }
         } else {
-            auto right = make_ptr<NodeType>();
+            auto right = allocate_node<NodeType>(this->alloc);
             if (this->persistent) {
-                auto left = make_ptr<NodeType>();
+                auto left = allocate_node<NodeType>(this->alloc);
                 bool new_element_left = insert_split_split(*left, *right, index, split, iter, right_most);
                 do_split(SplitType<NodeType>(std::move(left), std::move(right), true, new_element_left));
             } else {
@@ -370,7 +382,7 @@ struct InternalNodeBase : public Parent {
             ReplaceType<NodeType> replace{};
             compute_delta_erase(index, replace.delta);
             if (this->persistent) {
-                replace.delta.ptr = make_ptr<NodeType>();
+                replace.delta.ptr = allocate_node<NodeType>(this->alloc);
                 replace.delta.ptr_changed = true;
                 replace.carry = erase(*replace.delta.ptr, index, iter, right_most);
                 do_replace(replace);

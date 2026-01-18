@@ -49,14 +49,18 @@ namespace alpbook::nasdaq
         }
     };
 
-    template<typename Compare>
+    template<typename Compare, typename Allocator = std::allocator<void>>
     using OrderBookTree =
-        typename bpptree::BppTreeMap<uint64_t, PriceLevel, Compare>::template mixins<
-            bpptree::SummedBuilder<VolumeExtractor>>::Transient;
+        typename bpptree::BppTree<std::pair<uint64_t, PriceLevel>, 512, 512, 16, true, Allocator>
+            ::template mixins<
+                bpptree::OrderedBuilder<>::compare<Compare>,
+                bpptree::SummedBuilder<VolumeExtractor>>::Transient;
 
     /// Maps from a price to a PriceLevel on the sell side (ascending order).
-    using AskMap = OrderBookTree<bpptree::detail::MinComparator>;
+    template<typename Allocator = std::allocator<void>>
+    using AskMap = OrderBookTree<bpptree::detail::MinComparator, Allocator>;
 
     /// Maps from a price to a PriceLevel on the buy side (descending order).
-    using BidMap = OrderBookTree<bpptree::detail::MaxComparator>;
+    template<typename Allocator = std::allocator<void>>
+    using BidMap = OrderBookTree<bpptree::detail::MaxComparator, Allocator>;
 }  // namespace alpbook::nasdaq

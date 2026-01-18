@@ -39,6 +39,7 @@ private:
 public:
     template <typename Parent>
     struct LeafNode : public Parent {
+        using Parent::Parent;
 
         using InfoType = typename Parent::InfoType;
 
@@ -194,7 +195,13 @@ public:
 
         InternalNode() = default;
 
-        InternalNode(InternalNode const& other) noexcept(noexcept(Parent(other)) && std::is_nothrow_copy_constructible_v<Key>) : Parent(other), keys(other.keys, other.length) {}
+        InternalNode(InternalNode const& other) = default;
+
+        template <typename Allocator>
+        InternalNode(Allocator const& alloc) : Parent(alloc) {}
+
+        template <typename Allocator>
+        InternalNode(InternalNode const& other, Allocator const& alloc) : Parent(other, alloc), keys(other.keys, other.length, alloc) {}
 
         InternalNode& operator=(InternalNode const& other) = delete;
 
@@ -204,18 +211,28 @@ public:
             }
         }
 
+        template <typename U>
+        void set_key(IndexType index, IndexType limit, U&& u) {
+            if (index < limit) {
+                keys[index] = std::forward<U>(u);
+            } else {
+                using Allocator = std::decay_t<decltype(this->alloc)>;
+                std::allocator_traits<Allocator>::construct(this->alloc, keys.begin() + index, std::forward<U>(u));
+            }
+        }
+
         void erase_element2(IndexType index) {
             keys.destruct(index);
             Parent::erase_element2(index);
         }
 
         void move_element2(IndexType dest_index, NodeType& source, IndexType source_index) {
-            keys.set(dest_index, this->length, source.keys.move(source_index));
+            set_key(dest_index, this->length, source.keys.move(source_index));
             Parent::move_element2(dest_index, source, source_index);
         }
 
         void copy_element2(IndexType dest_index, NodeType const& source, IndexType source_index) {
-            keys.set(dest_index, this->length, source.keys[source_index]);
+            set_key(dest_index, this->length, source.keys[source_index]);
             Parent::copy_element2(dest_index, source, source_index);
         }
 
@@ -225,7 +242,7 @@ public:
         }
 
         void set_element2(IndexType index, InfoType<ChildType>& t) {
-            keys.set(index, this->length, std::move(t.key));
+            set_key(index, this->length, std::move(t.key));
             Parent::set_element2(index, t);
         }
 

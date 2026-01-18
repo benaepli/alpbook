@@ -16,6 +16,7 @@ namespace bpptree::detail {
 
 template <typename Parent, typename Value, typename SizeType>
 struct IndexedLeafNode : public Parent {
+    using Parent::Parent;
 
     using InfoType = typename Parent::InfoType;
 
@@ -83,6 +84,18 @@ struct IndexedInternalNode : public Parent {
     using SplitType = typename Parent::template SplitType<PtrType>;
 
     SizeType child_counts[internal_size]{};
+
+    IndexedInternalNode() = default;
+
+    IndexedInternalNode(IndexedInternalNode const& other) = default;
+
+    template <typename Allocator>
+    IndexedInternalNode(Allocator const& alloc) : Parent(alloc) {}
+
+    template <typename Allocator>
+    IndexedInternalNode(IndexedInternalNode const& other, Allocator const& alloc) : Parent(other, alloc) {
+        std::copy(std::begin(other.child_counts), std::end(other.child_counts), std::begin(child_counts));
+    }
 
     void move_element2(IndexType dest_index, NodeType& source, IndexType source_index) {
         child_counts[dest_index] = std::move(source.child_counts[source_index]);

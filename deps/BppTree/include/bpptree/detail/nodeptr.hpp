@@ -40,7 +40,7 @@ class NodePtr {
         if (ptr != nullptr) {
             if (ptr->ref_count.fetch_sub(1, std::memory_order_release) == 1) {
                 std::atomic_thread_fence(std::memory_order_acquire);
-                delete ptr;
+                ptr->destroy_self();
                 if constexpr (count_allocations) ++deallocations;
             }
             if constexpr (count_allocations) ++decrements;
@@ -106,6 +106,28 @@ public:
         dec_ref();
     }
 };
+
+template <typename PtrType, typename Allocator, typename... Ts>
+NodePtr<PtrType> allocate_node(Allocator& alloc, Ts&&... ts) {
+    if constexpr (count_allocations) {
+        ++allocations;
+        ++increments;
+    }
+    using Alloc = typename std::allocator_traits<std::remove_const_t<Allocator>>::template rebind_alloc<PtrType>;
+    Alloc node_alloc(alloc);
+    PtrType* ptr = std::allocator_traits<Alloc>::allocate(node_alloc, 1);
+#if __cpp_exceptions
+    try {
+        std::allocator_traits<Alloc>::construct(node_alloc, ptr, std::forward<Ts>(ts)..., alloc);
+    } catch (...) {
+        std::allocator_traits<Alloc>::deallocate(node_alloc, ptr, 1);
+        throw;
+    }
+#else
+    std::allocator_traits<Alloc>::construct(node_alloc, ptr, std::forward<Ts>(ts)..., alloc);
+#endif
+    return NodePtr<PtrType>(ptr);
+}
 
 template <typename PtrType, typename... Ts>
 NodePtr<PtrType> make_ptr(Ts&&... ts) noexcept(std::is_nothrow_constructible_v<PtrType, Ts&&...>) {

@@ -14,6 +14,7 @@ namespace bpptree::detail {
 
 template <
         typename Value,
+        typename Allocator,
         ssize leaf_node_bytes = 512,
         ssize internal_node_bytes = 512,
         ssize depth_limit = 16,
@@ -37,6 +38,7 @@ struct NodeTypesDetail {
     template <typename PtrType>
     struct NodeInfo : public NodeInfoMixin<NodeInfo<PtrType>> {
         using Parent = NodeInfoMixin<NodeInfo<PtrType>>;
+        using Parent::Parent;
 
         NodePtr<PtrType> ptr{};
         bool ptr_changed = false;
@@ -54,7 +56,7 @@ struct NodeTypesDetail {
     template <typename Derived, auto leaf_size>
     struct LeafNodeMixin {
         template <typename Parent>
-        using LeafNodeBaseCurried = LeafNodeBase<Parent, Value, leaf_size, disable_exceptions>;
+        using LeafNodeBaseCurried = LeafNodeBase<Parent, Value, Allocator, leaf_size, disable_exceptions>;
         using Type = Chain<Derived,
                 Ts::template LeafNode...,
                 LeafNodeBaseCurried,
@@ -64,7 +66,7 @@ struct NodeTypesDetail {
     template<typename Derived, auto leaf_size, auto internal_size, auto depth>
     struct InternalNodeMixin {
         template <typename Parent>
-        using InternalNodeBaseCurried = InternalNodeBase<Parent, Value, leaf_size, internal_size, depth, disable_exceptions>;
+        using InternalNodeBaseCurried = InternalNodeBase<Parent, Value, Allocator, leaf_size, internal_size, depth, disable_exceptions>;
         using Type = Chain<Derived,
                 Curry<Ts::template InternalNode, internal_size>::template Mixin...,
                 InternalNodeBaseCurried,
@@ -72,10 +74,16 @@ struct NodeTypesDetail {
     };
 
     template <auto leaf_size>
-    struct LeafNode : public LeafNodeMixin<LeafNode<leaf_size>, leaf_size>::Type {};
+    struct LeafNode : public LeafNodeMixin<LeafNode<leaf_size>, leaf_size>::Type {
+        using Parent = typename LeafNodeMixin<LeafNode<leaf_size>, leaf_size>::Type;
+        using Parent::Parent;
+    };
 
     template<auto leaf_size, auto internal_size, auto depth>
-    struct InternalNode : public InternalNodeMixin<InternalNode<leaf_size, internal_size, depth>, leaf_size, internal_size, depth>::Type {};
+    struct InternalNode : public InternalNodeMixin<InternalNode<leaf_size, internal_size, depth>, leaf_size, internal_size, depth>::Type {
+        using Parent = typename InternalNodeMixin<InternalNode<leaf_size, internal_size, depth>, leaf_size, internal_size, depth>::Type;
+        using Parent::Parent;
+    };
 
     template <typename Parent>
     struct NodeBase : public Parent {
@@ -91,14 +99,28 @@ struct NodeTypesDetail {
         std::atomic<uint32_t> ref_count = 1;
         uint16_t length = 0;
         bool persistent = false;
+        [[no_unique_address]] Allocator alloc;
 
         NodeBase() = default;
 
+        NodeBase(Allocator const& alloc) : alloc(alloc) {}
+
         // ref_count and persistent are intentionally not copied
-        NodeBase(NodeBase const& other) noexcept : Parent(other), length(other.length) {}
+        NodeBase(NodeBase const& other) noexcept : Parent(other), length(other.length), alloc(other.alloc) {}
+
+        NodeBase(NodeBase const& other, Allocator const& alloc) : Parent(other), length(other.length), alloc(alloc) {}
 
         // copy assignment is deleted because there is no scenario in which overwriting an existing node makes sense
         NodeBase& operator=(NodeBase const& other) = delete;
+
+        void destroy_self() {
+            using Derived = typename Parent::SelfType;
+            using Alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<Derived>;
+            Alloc node_alloc(alloc);
+            Derived* ptr = static_cast<Derived*>(this);
+            std::allocator_traits<Alloc>::destroy(node_alloc, ptr);
+            std::allocator_traits<Alloc>::deallocate(node_alloc, ptr, 1);
+        }
 
         ~NodeBase() = default;
     };

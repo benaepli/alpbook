@@ -71,7 +71,7 @@ struct ModifyTypes {
         void operator()([[maybe_unused]] SplitType&& split) {
             if constexpr (NodeType::depth < max_depth) {
                 using NewRootType = InternalNode<NodeType::depth + 1>;
-                auto root_node = make_ptr<NewRootType>();
+                auto root_node = allocate_node<NewRootType>(tree.get_allocator());
                 if (!split.left.ptr_changed) {
                     split.left.ptr = std::move(root);
                     split.left.ptr_changed = true;
@@ -96,7 +96,7 @@ struct ModifyTypes {
         explicit DoErase(TreeType& tree) : tree(tree) {}
 
         void operator()() {
-            tree.root_variant = make_ptr<LeafNode>();
+            tree.root_variant = allocate_node<LeafNode>(tree.get_allocator());
         }
     };
 

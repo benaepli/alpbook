@@ -51,6 +51,13 @@ public:
         std::uninitialized_copy_n(other.un.data, length, un.data);
     }
 
+    template <typename Allocator>
+    UninitializedArray(UninitializedArray const& other, size_t length, Allocator& alloc) {
+        for (size_t i = 0; i < length; ++i) {
+            std::allocator_traits<Allocator>::construct(alloc, un.data + i, other.un.data[i]);
+        }
+    }
+
     UninitializedArray(UninitializedArray const& other) = delete;
     UninitializedArray& operator=(UninitializedArray const& other) = delete;
     UninitializedArray(UninitializedArray && other) = delete;
@@ -153,6 +160,16 @@ public:
 
     T const* end() const {
         return cend();
+    }
+
+    template <typename I, typename L, typename Callback,
+            std::enable_if_t<std::is_integral_v<I>, bool> = true,
+            std::enable_if_t<std::is_integral_v<L>, bool> = true>
+    decltype(auto) emplace_with(I const index, L const length, Callback&& cb) {
+        if (static_cast<size_t const>(index) < static_cast<size_t const>(length)) {
+            destruct(index);
+        }
+        return cb(un.data + index);
     }
 };
 } //end namespace bpptree::detail

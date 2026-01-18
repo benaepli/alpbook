@@ -13,7 +13,7 @@
 
 namespace bpptree::detail {
 
-template <typename Parent, typename Value, auto leaf_size, bool disable_exceptions>
+template <typename Parent, typename Value, typename Allocator, auto leaf_size, bool disable_exceptions>
 struct LeafNodeBase : public Parent {
 
     using NodeType = typename Parent::SelfType;
@@ -38,7 +38,11 @@ struct LeafNodeBase : public Parent {
 
     LeafNodeBase() = default;
 
-    LeafNodeBase(LeafNodeBase const& other) : Parent(other), values(other.values, other.length) {}
+    LeafNodeBase(Allocator const& alloc) : Parent(alloc) {}
+
+    LeafNodeBase(LeafNodeBase const& other) = delete;
+
+    LeafNodeBase(LeafNodeBase const& other, Allocator const& alloc) : Parent(other, alloc), values(other.values, other.length, alloc) {}
 
     LeafNodeBase& operator=(LeafNodeBase const& other) = delete;
 
@@ -48,8 +52,25 @@ struct LeafNodeBase : public Parent {
         }
     }
 
+    template <typename U>
+    void set_value(IndexType index, IndexType limit, U&& u) {
+        if (index < limit) {
+             values[index] = std::forward<U>(u);
+        } else {
+             std::allocator_traits<Allocator>::construct(this->alloc, values.begin() + index, std::forward<U>(u));
+        }
+    }
+
+    template <typename... Args>
+    void emplace_value(IndexType index, IndexType limit, Args&&... args) {
+        values.emplace_with(index, limit, [&](Value* ptr) -> Value& {
+             std::allocator_traits<Allocator>::construct(this->alloc, ptr, std::forward<Args>(args)...);
+             return *ptr;
+        });
+    }
+
     static IndexType get_index(uint64_t it) {
-        return (it >> it_shift) & it_mask;
+        return static_cast<IndexType>((it >> it_shift) & it_mask);
     }
 
     static void clear_index(uint64_t& it) {
@@ -88,15 +109,15 @@ struct LeafNodeBase : public Parent {
     void insert_no_split(LeafNodeBase& node, IndexType index, Args&&... args) noexcept(disable_exceptions) {
         for (IndexType i = this->length; i > index; --i) {
             if (this->persistent) {
-                node.values.set(i, node.length, values[i - 1]);
+                node.set_value(i, node.length, values[i - 1]);
             } else {
-                node.values.set(i, node.length, values.move(i - 1));
+                node.set_value(i, node.length, values.move(i - 1));
             }
         }
-        node.values.emplace(index, node.length, std::forward<Args>(args)...);
+        node.emplace_value(index, node.length, std::forward<Args>(args)...);
         if (this->persistent) {
             for (IndexType i = 0; i < index; ++i) {
-                node.values.set(i, node.length, values[i]);
+                node.set_value(i, node.length, values[i]);
             }
         }
         node.length = this->length + 1;
@@ -105,9 +126,9 @@ struct LeafNodeBase : public Parent {
     template <typename T>
     void set_element(LeafNodeBase& left, LeafNodeBase& right, IndexType index, IndexType split_point, T&& t) {
         if (index < split_point) {
-            left.values.set(index, left.length, std::forward<T>(t));
+            left.set_value(index, left.length, std::forward<T>(t));
         } else {
-            right.values.set(index - split_point, right.length, std::forward<T>(t));
+            right.set_value(index - split_point, right.length, std::forward<T>(t));
         }
     }
 
@@ -122,9 +143,9 @@ struct LeafNodeBase : public Parent {
             }
         }
         if (index < split_point) {
-            left.values.emplace(index, left.length, std::forward<Args>(args)...);
+            left.emplace_value(index, left.length, std::forward<Args>(args)...);
         } else {
-            right.values.emplace(index - split_point, right.length, std::forward<Args>(args)...);
+            right.emplace_value(index - split_point, right.length, std::forward<Args>(args)...);
         }
         for (IndexType i = this->persistent ? 0 : split_point; i < index; ++i) {
             if (this->persistent) {
@@ -154,7 +175,7 @@ struct LeafNodeBase : public Parent {
             ReplaceType replace{};
             compute_delta_insert(index, replace.delta, args...);
             if (this->persistent) {
-                replace.delta.ptr = make_ptr<NodeType>();
+                replace.delta.ptr = allocate_node<NodeType>(this->alloc);
                 replace.delta.ptr_changed = true;
                 insert_no_split(*replace.delta.ptr, index, std::forward<Args>(args)...);
                 do_replace(replace);
@@ -163,9 +184,9 @@ struct LeafNodeBase : public Parent {
                 do_replace(replace);
             }
         } else {
-            auto right = make_ptr<NodeType>();
+            auto right = allocate_node<NodeType>(this->alloc);
             if (this->persistent) {
-                NodePtr<NodeType> left = make_ptr<NodeType>();
+                NodePtr<NodeType> left = allocate_node<NodeType>(this->alloc);
                 bool new_element_left = insert_split(*left, *right, index, iter, right_most, std::forward<Args>(args)...);
                 do_split(SplitType(std::move(left), std::move(right), true, new_element_left));
             } else {
@@ -187,12 +208,19 @@ struct LeafNodeBase : public Parent {
         ReplaceType replace{};
         compute_delta_set(index, replace.delta, args...);
         if (this->persistent) {
-            replace.delta.ptr = make_ptr<NodeType>(this->self());
+            // Use allocate_node with copy + allocator
+            replace.delta.ptr = allocate_node<NodeType>(this->alloc, this->self());
             replace.delta.ptr_changed = true;
-            replace.delta.ptr->values.emplace(index, replace.delta.ptr->length, std::forward<Args>(args)...);
+            replace.delta.ptr->emplace_value(index, replace.delta.ptr->length, std::forward<Args>(args)...);
             do_replace(replace);
         } else {
-            values.emplace_unchecked(index, std::forward<Args>(args)...);
+            // Emplace_unchecked used index, no limit?
+            // values.emplace_unchecked assumed valid?
+            // "unchecked" version in UninitializedArray just does assignment/placement new without destroy if index < length??
+            // UninitializedArray::emplace_unchecked:
+            // if assignable: assign. else destruct and new.
+            // So emplace_value handles this too.
+            this->emplace_value(index, this->length, std::forward<Args>(args)...);
             do_replace(replace);
         }
     }
@@ -206,14 +234,14 @@ struct LeafNodeBase : public Parent {
     bool erase(LeafNodeBase& node, IndexType index, uint64_t& iter, bool right_most) {
         if (this->persistent) {
             for (IndexType i = 0; i < index; ++i) {
-                node.values.set(i, node.length, values[i]);
+                node.set_value(i, node.length, values[i]);
             }
         }
         for (IndexType i = index + 1; i < this->length; ++i) {
             if (this->persistent) {
-                node.values.set(i - 1, node.length, values[i]);
+                node.set_value(i - 1, node.length, values[i]);
             } else {
-                node.values.set(i - 1, node.length, values.move(i));
+                node.set_value(i - 1, node.length, values.move(i));
             }
         }
         if (node.length == this->length) {
@@ -231,7 +259,7 @@ struct LeafNodeBase : public Parent {
             ReplaceType replace{};
             compute_delta_erase(index, replace.delta);
             if (this->persistent) {
-                replace.delta.ptr = make_ptr<NodeType>();
+                replace.delta.ptr = allocate_node<NodeType>(this->alloc);
                 replace.delta.ptr_changed = true;
                 replace.carry = erase(*replace.delta.ptr, index, iter, right_most);
                 do_replace(replace);

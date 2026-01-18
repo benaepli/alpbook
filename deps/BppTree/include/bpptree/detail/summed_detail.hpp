@@ -16,6 +16,7 @@ namespace bpptree::detail {
 
 template <typename Parent, typename SumType, typename Extractor>
 struct SummedLeafNode : public Parent {
+    using Parent::Parent;
 
     static constexpr Extractor extractor{};
 
@@ -104,6 +105,18 @@ struct SummedInternalNode : public Parent {
     using SplitType = typename Parent::template SplitType<PtrType>;
 
     SumType child_sums[internal_size]{};
+
+    SummedInternalNode() = default;
+
+    SummedInternalNode(SummedInternalNode const& other) = default;
+
+    template <typename Allocator>
+    SummedInternalNode(Allocator const& alloc) : Parent(alloc) {}
+
+    template <typename Allocator>
+    SummedInternalNode(SummedInternalNode const& other, Allocator const& alloc) : Parent(other, alloc) {
+        std::copy(std::begin(other.child_sums), std::end(other.child_sums), std::begin(child_sums));
+    }
 
     void move_element2(IndexType dest_index, NodeType& source, IndexType source_index) {
         child_sums[dest_index] = std::move(source.child_sums[source_index]);

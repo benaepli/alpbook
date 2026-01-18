@@ -24,7 +24,11 @@ namespace
         void onTrade(price_t, quantity_t, Side) {}
     };
 
-    using BenchBook = alpbook::nasdaq::Book<NoOpListener, 20000>;
+    // For mutation benchmarks with smaller workloads
+    using BenchBook_Mutation = alpbook::nasdaq::Book<NoOpListener, 15'000>;
+
+    // For query benchmarks with larger workloads
+    using BenchBook_Query = alpbook::nasdaq::Book<NoOpListener, 150'000>;
 
     class OrderIdGenerator
     {
@@ -90,7 +94,7 @@ namespace
         auto dataset = generateOrders(bookSize + batchSize);
 
         NoOpListener listener;
-        BenchBook book(listener);
+        BenchBook_Mutation book(listener);
 
         while (state.KeepRunningBatch(batchSize))
         {
@@ -126,7 +130,7 @@ namespace
         }
 
         NoOpListener listener;
-        BenchBook book(listener);
+        BenchBook_Mutation book(listener);
 
         while (state.KeepRunningBatch(batchSize))
         {
@@ -161,7 +165,7 @@ namespace
         }
 
         NoOpListener listener;
-        BenchBook book(listener);
+        BenchBook_Mutation book(listener);
 
         while (state.KeepRunningBatch(batchSize))
         {
@@ -179,12 +183,12 @@ namespace
             }
         }
     }
-    BENCHMARK(BM_Cancel)->RangeMultiplier(10)->Range(10, 10000);
+    BENCHMARK(BM_Cancel)->RangeMultiplier(10)->Range(100, 10000);
 
     void BM_Replace(benchmark::State& state)
     {
         NoOpListener listener;
-        BenchBook book(listener);
+        BenchBook_Mutation book(listener);
         OrderIdGenerator orderGen;
 
         std::mt19937 rng(42);
@@ -211,12 +215,12 @@ namespace
             ++idx;
         }
     }
-    BENCHMARK(BM_Replace)->RangeMultiplier(10)->Range(10, 10000);
+    BENCHMARK(BM_Replace)->RangeMultiplier(10)->Range(100, 10000);
 
     void BM_GetBestBid(benchmark::State& state)
     {
         NoOpListener listener;
-        BenchBook book(listener);
+        BenchBook_Query book(listener);
         OrderIdGenerator orderGen;
 
         std::mt19937 rng(42);
@@ -234,12 +238,12 @@ namespace
             benchmark::DoNotOptimize(book.getBestBid());
         }
     }
-    BENCHMARK(BM_GetBestBid)->RangeMultiplier(10)->Range(10, 100000);
+    BENCHMARK(BM_GetBestBid)->RangeMultiplier(10)->Range(100, 100000);
 
     void BM_GetBidLevel(benchmark::State& state)
     {
         NoOpListener listener;
-        alpbook::nasdaq::Book<NoOpListener> book(listener);
+        BenchBook_Query book(listener);
         OrderIdGenerator orderGen;
 
         std::mt19937 rng(42);
@@ -259,12 +263,12 @@ namespace
             ++depth;
         }
     }
-    BENCHMARK(BM_GetBidLevel)->RangeMultiplier(10)->Range(10, 100000);
+    BENCHMARK(BM_GetBidLevel)->RangeMultiplier(10)->Range(100, 100000);
 
     void BM_GetBuyVolumeAhead(benchmark::State& state)
     {
         NoOpListener listener;
-        alpbook::nasdaq::Book<NoOpListener> book(listener);
+        BenchBook_Query book(listener);
         OrderIdGenerator orderGen;
 
         std::mt19937 rng(42);
@@ -282,12 +286,12 @@ namespace
             benchmark::DoNotOptimize(book.getBuyVolumeAhead(price_t(100)));
         }
     }
-    BENCHMARK(BM_GetBuyVolumeAhead)->RangeMultiplier(10)->Range(10, 100000);
+    BENCHMARK(BM_GetBuyVolumeAhead)->RangeMultiplier(10)->Range(100, 100000);
 
     void BM_GetBuyVolumeAheadByOrder(benchmark::State& state)
     {
         NoOpListener listener;
-        BenchBook book(listener);
+        BenchBook_Mutation book(listener);
         OrderIdGenerator orderGen;
 
         std::mt19937 rng(42);
@@ -311,5 +315,5 @@ namespace
             ++idx;
         }
     }
-    BENCHMARK(BM_GetBuyVolumeAheadByOrder)->RangeMultiplier(10)->Range(10, 100000);
+    BENCHMARK(BM_GetBuyVolumeAheadByOrder)->RangeMultiplier(10)->Range(100, 10000);
 }  // namespace

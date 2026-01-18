@@ -17,6 +17,9 @@ struct Top {
     SelfType&& self() && { return static_cast<SelfType&&>(*this); }
     SelfType const& self() const& { return static_cast<SelfType const&>(*this); }
     SelfType const&& self() const&& { return static_cast<SelfType const&&>(*this); }
+    Top() = default;
+    template <typename... Args>
+    explicit Top(Args&&...) {}
 };
 
 template <template <typename, auto...> typename M, auto... args>
