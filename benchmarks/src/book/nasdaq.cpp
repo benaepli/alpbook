@@ -76,122 +76,108 @@ namespace
         return dataset;
     }
 
+    size_t getBatchSize(benchmark::State& state, size_t maxBatch = 1000)
+    {
+        size_t bookSize = static_cast<size_t>(state.range(0));
+        return (bookSize < maxBatch) ? bookSize : maxBatch;
+    }
+
     void BM_Add(benchmark::State& state)
     {
-        NoOpListener listener;
-        alpbook::nasdaq::Book<NoOpListener> book(listener);
-        OrderIdGenerator orderGen;
-
-        std::mt19937 rng(42);
-        std::uniform_int_distribution<uint64_t> priceDist(90, 110);
-        std::uniform_int_distribution<uint32_t> qtyDist(10, 100);
-        std::bernoulli_distribution sideDist(0.5);
-
         auto bookSize = static_cast<size_t>(state.range(0));
-        for (size_t i = 0; i < bookSize; ++i)
-        {
-            if (sideDist(rng))
-                book.add(orderGen.createBuy(priceDist(rng), qtyDist(rng)));
-            else
-                book.add(orderGen.createSell(priceDist(rng), qtyDist(rng)));
-        }
+        size_t batchSize = 1000;
 
-        for (auto _ : state)
+        auto dataset = generateOrders(bookSize + batchSize);
+
+        NoOpListener listener;
+        BenchBook book(listener);
+
+        while (state.KeepRunningBatch(batchSize))
         {
-            if (sideDist(rng))
-                book.add(orderGen.createBuy(priceDist(rng), qtyDist(rng)));
-            else
-                book.add(orderGen.createSell(priceDist(rng), qtyDist(rng)));
+            state.PauseTiming();
+            book.reset();
+            for (size_t i = 0; i < bookSize; ++i)
+            {
+                book.add(dataset.orders[i]);
+            }
+            state.ResumeTiming();
+
+            for (size_t i = 0; i < batchSize; ++i)
+            {
+                book.add(dataset.orders[bookSize + i]);
+            }
         }
     }
-    BENCHMARK(BM_Add)->RangeMultiplier(10)->Range(10, 10000);
+    BENCHMARK(BM_Add)->RangeMultiplier(10)->Range(100, 10000);
 
     void BM_Execute(benchmark::State& state)
     {
         auto bookSize = static_cast<size_t>(state.range(0));
+        size_t batchSize = getBatchSize(state);
 
-        std::mt19937 rng(42);
-        std::uniform_int_distribution<uint64_t> priceDist(90, 110);
-        std::uniform_int_distribution<uint32_t> qtyDist(10, 100);
-        std::bernoulli_distribution sideDist(0.5);
+        auto dataset = generateOrders(bookSize);
 
-        OrderIdGenerator orderGen;
-        std::vector<AddOrder> precalcOrders;
-        std::vector<uint64_t> targetIds;
-
-        precalcOrders.reserve(bookSize);
-        targetIds.reserve(bookSize);
-
-        for (size_t i = 0; i < bookSize; ++i)
+        // Prepare execution payloads
+        std::vector<ExecuteOrder> execs;
+        execs.reserve(batchSize);
+        for (size_t i = 0; i < batchSize; ++i)
         {
-            if (sideDist(rng))
-                precalcOrders.push_back(orderGen.createBuy(priceDist(rng), qtyDist(rng)));
-            else
-                precalcOrders.push_back(orderGen.createSell(priceDist(rng), qtyDist(rng)));
-
-            targetIds.push_back(orderGen.lastId());
+            execs.push_back({dataset.orderIds[i], 10});
         }
 
         NoOpListener listener;
+        BenchBook book(listener);
 
-        for (auto _ : state)
+        while (state.KeepRunningBatch(batchSize))
         {
-            BenchBook book(listener);
-            for (auto const& order : precalcOrders)
+            state.PauseTiming();
+            book.reset();
+
+            for (auto const& order : dataset.orders)
             {
                 book.add(order);
             }
-
-            for (auto id : targetIds)
+            state.ResumeTiming();
+            for (auto const& txn : execs)
             {
-                book.execute(ExecuteOrder {id, 10});
+                book.execute(txn);
             }
         }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(bookSize));
     }
-    BENCHMARK(BM_Execute)->RangeMultiplier(10)->Range(10, 10000);
+    BENCHMARK(BM_Execute)->RangeMultiplier(10)->Range(100, 10000);
 
     void BM_Cancel(benchmark::State& state)
     {
         auto bookSize = static_cast<size_t>(state.range(0));
+        size_t batchSize = getBatchSize(state);
 
-        std::mt19937 rng(42);
-        std::uniform_int_distribution<uint64_t> priceDist(90, 110);
-        std::uniform_int_distribution<uint32_t> qtyDist(10, 100);
-        std::bernoulli_distribution sideDist(0.5);
+        auto dataset = generateOrders(bookSize);
 
-        OrderIdGenerator orderGen;
-        std::vector<AddOrder> precalcOrders;
-        std::vector<uint64_t> targetIds;
-
-        precalcOrders.reserve(bookSize);
-        targetIds.reserve(bookSize);
-
-        for (size_t i = 0; i < bookSize; ++i)
+        std::vector<CancelOrder> cancels;
+        cancels.reserve(batchSize);
+        for (size_t i = 0; i < batchSize; ++i)
         {
-            if (sideDist(rng))
-                precalcOrders.push_back(orderGen.createBuy(priceDist(rng), qtyDist(rng)));
-            else
-                precalcOrders.push_back(orderGen.createSell(priceDist(rng), qtyDist(rng)));
-            targetIds.push_back(orderGen.lastId());
+            cancels.push_back({dataset.orderIds[i]});
         }
 
         NoOpListener listener;
+        BenchBook book(listener);
 
-        for (auto _ : state)
+        while (state.KeepRunningBatch(batchSize))
         {
-            BenchBook book(listener);
-            for (auto const& order : precalcOrders)
+            state.PauseTiming();
+            book.reset();
+            for (auto const& order : dataset.orders)
             {
                 book.add(order);
             }
+            state.ResumeTiming();
 
-            for (auto id : targetIds)
+            for (auto const& txn : cancels)
             {
-                book.cancel(CancelOrder {id});
+                book.cancel(txn);
             }
         }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(bookSize));
     }
     BENCHMARK(BM_Cancel)->RangeMultiplier(10)->Range(10, 10000);
 
@@ -248,7 +234,7 @@ namespace
             benchmark::DoNotOptimize(book.getBestBid());
         }
     }
-    BENCHMARK(BM_GetBestBid)->RangeMultiplier(10)->Range(10, 10000);
+    BENCHMARK(BM_GetBestBid)->RangeMultiplier(10)->Range(10, 100000);
 
     void BM_GetBidLevel(benchmark::State& state)
     {
@@ -273,7 +259,7 @@ namespace
             ++depth;
         }
     }
-    BENCHMARK(BM_GetBidLevel)->RangeMultiplier(10)->Range(10, 10000);
+    BENCHMARK(BM_GetBidLevel)->RangeMultiplier(10)->Range(10, 100000);
 
     void BM_GetBuyVolumeAhead(benchmark::State& state)
     {
@@ -296,7 +282,7 @@ namespace
             benchmark::DoNotOptimize(book.getBuyVolumeAhead(price_t(100)));
         }
     }
-    BENCHMARK(BM_GetBuyVolumeAhead)->RangeMultiplier(10)->Range(10, 10000);
+    BENCHMARK(BM_GetBuyVolumeAhead)->RangeMultiplier(10)->Range(10, 100000);
 
     void BM_GetBuyVolumeAheadByOrder(benchmark::State& state)
     {
@@ -325,5 +311,5 @@ namespace
             ++idx;
         }
     }
-    BENCHMARK(BM_GetBuyVolumeAheadByOrder)->RangeMultiplier(10)->Range(10, 10000);
+    BENCHMARK(BM_GetBuyVolumeAheadByOrder)->RangeMultiplier(10)->Range(10, 100000);
 }  // namespace

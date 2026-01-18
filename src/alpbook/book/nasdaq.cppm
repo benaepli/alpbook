@@ -71,6 +71,11 @@ namespace alpbook::nasdaq
         {
         }
 
+        Book(Book const&) = delete;
+        Book& operator=(Book const&) = delete;
+        Book(Book&&) = delete;
+        Book& operator=(Book&&) = delete;
+
         void setListener(L& listener) noexcept { listener_ = &listener; }
 
         void reset() noexcept
