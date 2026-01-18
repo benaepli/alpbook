@@ -24,23 +24,29 @@ namespace alpbook
         { worker.onMessage(data) } -> std::same_as<void>;
     };
 
-    /// A factory for PacketSink. It must be thread-safe.
-    export template<typename F, size_t SlotSize>
-    concept SinkFactory = std::copy_constructible<F> && requires(F factory, uint32_t coreIndex) {
-        typename F::SinkType;
-        { factory.create(coreIndex) } -> std::same_as<typename F::SinkType>;
-        requires PacketSink<SlotSize, typename F::SinkType>;
-    };
-
     export template<size_t SlotSize, typename T>
     concept IDExtractor = requires(MsgSlot<SlotSize> const& slot) {
         { T::extractID(slot) } -> std::convertible_to<uint16_t>;
     };
 
-    export template<typename T, typename IDType = uint16_t>
-    concept IDMapper = requires(T mapper, uint32_t threadCount, IDType id) {
+    export template<typename T, typename IdType = uint16_t>
+    concept IDMapper = requires(T mapper, uint32_t threadCount, IdType id) {
         { mapper.setThreadCount(threadCount) } -> std::same_as<void>;
         { mapper.getWorkerIndex(id) } -> std::convertible_to<uint32_t>;
+    };
+
+    /// A factory for PacketSink. It must be thread-safe.
+    export template<typename F, size_t SlotSize, typename Mapper>
+    concept SinkFactory =
+        std::copy_constructible<F> && requires(F factory, uint32_t core, Mapper const& m) {
+            typename F::SinkType;
+            { factory.create(core, m) } -> std::same_as<typename F::SinkType>;
+            requires PacketSink<SlotSize, typename F::SinkType>;
+        };
+
+    template<typename T, typename IdType = uint16_t>
+    concept EnumerableMapper = IDMapper<T, IdType> && requires(T mapper, uint32_t core) {
+        { mapper.getIDsForThread(core) } -> std::same_as<std::vector<IdType>>;
     };
 
     export enum class DispatchError : uint8_t
@@ -51,7 +57,7 @@ namespace alpbook
     /// Dispatches messages to workers based on templated policies.
     /// Thread counts are guaranteed to be a power of 2.
     export template<size_t SlotSize, typename F, typename E, typename M>
-        requires SinkFactory<F, SlotSize> && IDExtractor<SlotSize, E> && IDMapper<M>
+        requires SinkFactory<F, SlotSize, M> && IDExtractor<SlotSize, E> && IDMapper<M>
     class Dispatcher
     {
         using Sink = F::SinkType;
@@ -76,13 +82,13 @@ namespace alpbook
         {
             for (auto& worker : workers_)
             {
-                worker.running.store(false, std::memory_order_release);
+                worker->running.store(false, std::memory_order_release);
             }
             for (auto& worker : workers_)
             {
-                if (worker.thread.joinable())
+                if (worker->thread.joinable())
                 {
-                    worker.thread.join();
+                    worker->thread.join();
                 }
             }
         }
@@ -110,18 +116,24 @@ namespace alpbook
             }
 
             cores = std::bit_floor(cores);
+            if (cores == 0)
+                cores = 1;
+
+            mapper_->setThreadCount(cores);
 
             workers_.reserve(cores);
             for (uint32_t i = 0; i < cores; i++)
             {
-                workers_.push_back(Worker {
-                    .core = i,
-                    .running = true,
-                });
-                workers_[i].thread =
-                    std::thread([this, i, fact = factory_] { workerLoop(i, fact); });
+                auto worker = std::make_unique<Worker>();
+                worker->core = i;
+                worker->running.store(true);
+                workers_.push_back(std::move(worker));
             }
-            mapper_->setThreadCount(cores);
+            for (uint32_t i = 0; i < cores; i++)
+            {
+                workers_[i]->thread = std::thread([this, i, fact = factory_, mapper = mapper_]
+                                                  { workerLoop(i, fact, *mapper); });
+            }
             return {};
         }
 
@@ -132,17 +144,17 @@ namespace alpbook
             uint32_t threadIdx = mapper_->getWorkerIndex(id);
             if (threadIdx != DROP_MSG)
             {
-                workers_[threadIdx].queue.enqueue(slot);
+                workers_[threadIdx]->queue.enqueue(slot);
             }
         }
 
       private:
-        void workerLoop(uint32_t core, F factory)
+        void workerLoop(uint32_t core, F factory, M const& mapper)
         {
-            auto& queue = workers_[core].queue;
-            auto& running = workers_[core].running;
+            auto& queue = workers_[core]->queue;
+            auto& running = workers_[core]->running;
             pinner_->pinToCore(core);
-            auto sink = factory.create(core);
+            auto sink = factory.create(core, mapper);
 
             constexpr uint32_t busyThreshold = 2000;
             constexpr uint32_t relaxThreshold = 50000;
@@ -177,7 +189,7 @@ namespace alpbook
                 moodycamel::ReaderWriterQueue<MsgSlot<SlotSize>> queue;
             std::thread thread;
         };
-        std::vector<Worker> workers_ {};
+        std::vector<std::unique_ptr<Worker>> workers_ {};
     };
 
 }  // namespace alpbook

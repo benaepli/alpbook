@@ -1,5 +1,7 @@
 module;
 
+#include <concepts>
+
 import alpbook.book.nasdaq;
 
 export module alpbook.itch.parsing:listener;
