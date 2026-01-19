@@ -3,6 +3,8 @@ module;
 #include <cmath>
 #include <concepts>
 #include <expected>
+#include <limits>
+#include <optional>
 #include <print>
 #include <thread>
 
@@ -54,9 +56,13 @@ namespace alpbook
         PinError,
     };
 
+    export struct SynchronousDispatch
+    {
+    };
+
     /// Dispatches messages to workers based on templated policies.
     /// Thread counts are guaranteed to be a power of 2.
-    export template<typename Slot, typename F, typename E, typename M>
+    export template<typename Slot, typename F, typename E, typename M, typename Policy = void>
         requires DispatchSlot<Slot> && SinkFactory<F, Slot, M> && IDExtractor<Slot, E>
         && IDMapper<M>
     class Dispatcher
@@ -95,7 +101,7 @@ namespace alpbook
         }
 
         /// Initializes a dispatcher. maxWorkers being zero is equivalent to no limit.
-        std::expected<void, DispatchError> init(uint32_t maxWorkers)
+        std::expected<uint32_t, DispatchError> init(uint32_t maxWorkers)
         {
             auto pinner = internal::Pinner::create();
             if (!pinner.has_value())
@@ -137,7 +143,7 @@ namespace alpbook
                 workers_[i]->thread = std::thread([this, i, fact = factory_, mapper = mapper_]
                                                   { workerLoop(i, fact, *mapper); });
             }
-            return {};
+            return cores;
         }
 
         /// Extracts the ID and routes the message to the correct worker queue.
@@ -159,11 +165,10 @@ namespace alpbook
             pinner_->pinToCore(core);
             auto sink = factory.create(core, mapper);
 
-            constexpr uint32_t busyThreshold = 2000;
-            constexpr uint32_t relaxThreshold = 50000;
+            constexpr uint32_t busyThreshold = 10000;
+            constexpr uint32_t relaxThreshold = std::numeric_limits<uint32_t>::max();
 
             internal::Backoff<busyThreshold, relaxThreshold> backoff;
-
             while (running.load(std::memory_order_relaxed))
             {
                 Slot slot;
@@ -193,6 +198,63 @@ namespace alpbook
             std::thread thread;
         };
         std::vector<std::unique_ptr<Worker>> workers_ {};
+    };
+
+    /// Specialization for single-threaded, immediate dispatch.
+    export template<typename Slot, typename F, typename E, typename M>
+        requires DispatchSlot<Slot> && SinkFactory<F, Slot, M> && IDExtractor<Slot, E>
+        && IDMapper<M>
+    class Dispatcher<Slot, F, E, M, SynchronousDispatch>
+    {
+        using Sink = F::SinkType;
+        static constexpr uint32_t DROP_MSG = std::numeric_limits<uint32_t>::max();
+
+      public:
+        explicit Dispatcher(M& mapper, F factory)
+            : mapper_(&mapper)
+            , factory_(std::move(factory))
+        {
+        }
+
+        // No-op or update internal pointer
+        void setMapper(M& mapper) { mapper_ = &mapper; }
+
+        Dispatcher(Dispatcher const&) = delete;
+        Dispatcher& operator=(Dispatcher const&) = delete;
+        Dispatcher(Dispatcher&&) = default;
+        Dispatcher& operator=(Dispatcher&&) = default;
+        ~Dispatcher() = default;
+
+        /// Initializes the single sink.
+        /// Ignores maxWorkers (treats it as 1) and Pinning logic. Returns 0.
+        std::expected<uint32_t, DispatchError> init(uint32_t /*maxWorkers*/)
+        {
+            // Treat as single core (index 0)
+            mapper_->setThreadCount(1);
+
+            // Create the sink immediately for the current thread (core 0)
+            sink_ = factory_.create(0, *mapper_);
+            return 0;
+        }
+
+        /// Immediately processes the message on the calling thread.
+        void dispatch(Slot const& slot)
+        {
+            uint16_t id = E::extractID(slot);
+
+            // We still check the mapper to ensure the ID is valid for this "worker"
+            if (mapper_->getWorkerIndex(id) != DROP_MSG)
+            {
+                // Direct function call instead of enqueueing
+                sink_->onMessage(slot);
+            }
+        }
+
+      private:
+        M* mapper_ = nullptr;
+        F factory_;
+        // We hold the sink directly instead of a list of Workers
+        std::optional<Sink> sink_;
     };
 
 }  // namespace alpbook

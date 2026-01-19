@@ -29,6 +29,11 @@ export namespace alpbook::internal
             {
                 return std::unexpected(PinError::InitializationFailed);
             }
+            if (hwloc_topology_load(pinner->topology_) != 0)
+            {
+                hwloc_topology_destroy(pinner->topology_);
+                return std::unexpected(PinError::InitializationFailed);
+            }
             return pinner;
         }
 
