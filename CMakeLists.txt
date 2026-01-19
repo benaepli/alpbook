@@ -53,6 +53,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(readerwriterqueue)
 
+FetchContent_Declare(
+        zlib
+        GIT_REPOSITORY https://github.com/madler/zlib.git
+        GIT_TAG v1.3.1
+)
+FetchContent_MakeAvailable(zlib)
+
 add_subdirectory(deps/BppTree)
 
 add_library(alpbook)
@@ -75,10 +82,11 @@ target_sources(alpbook
         src/alpbook/itch/dispatch.cppm
         src/alpbook/itch/parsing.cppm
         src/alpbook/itch/parsing-listener.cppm
+        src/alpbook/itch/reader.cppm
         src/alpbook/sink/nasdaq.cppm
         src/alpbook/strategy.cppm
 )
-target_link_libraries(alpbook PRIVATE eve::eve absl::flat_hash_map absl::numeric bpptree::bpptree hwloc readerwriterqueue)
+target_link_libraries(alpbook PRIVATE eve::eve absl::flat_hash_map absl::numeric bpptree::bpptree hwloc readerwriterqueue zlibstatic)
 target_compile_features(alpbook PUBLIC cxx_std_23)
 
 if (ALPBOOK_BUILD_TESTS)

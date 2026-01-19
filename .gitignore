@@ -10,3 +10,7 @@ CMakeLists.txt.user
 CMakeUserPresets.json
 compile_commands.jsonCMakeUserPresets.json
 .cache
+*.gz
+massif.out.*
+output*
+heaptrack*

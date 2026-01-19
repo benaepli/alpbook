@@ -79,6 +79,12 @@ struct MockStrategy
     }
 };
 
+struct MockStrategyFactory
+{
+    using StrategyType = MockStrategy;
+    MockStrategy create(uint16_t) const { return MockStrategy {}; }
+};
+
 class MockMapper
 {
     std::vector<uint16_t> assetIds_;
@@ -194,11 +200,12 @@ namespace TestHelpers
 class ContextTest : public ::testing::Test
 {
   protected:
-    std::unique_ptr<alpbook::nasdaq::Context<MockStrategy>> context;
+    MockStrategyFactory factory;
+    std::unique_ptr<alpbook::nasdaq::Context<MockStrategy, MockStrategyFactory>> context;
 
     void SetUp() override
     {
-        context = std::make_unique<alpbook::nasdaq::Context<MockStrategy>>(100);
+        context = std::make_unique<alpbook::nasdaq::Context<MockStrategy, MockStrategyFactory>>(100, factory);
     }
 
     void TearDown() override { context.reset(); }
@@ -357,7 +364,8 @@ class SinkTest : public ::testing::Test
 {
   protected:
     MockMapper mapper;
-    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy>> sink;
+    MockStrategyFactory factory;
+    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>> sink;
 
     void SetUp() override
     {
@@ -366,7 +374,7 @@ class SinkTest : public ::testing::Test
         mapper.addAsset(101);
         mapper.addAsset(102);
 
-        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy>>(0, mapper);
+        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>>(0, mapper, factory);
     }
 
     void TearDown() override { sink.reset(); }
@@ -454,12 +462,13 @@ class ItchIntegrationTest : public ::testing::Test
 {
   protected:
     MockMapper mapper;
-    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy>> sink;
+    MockStrategyFactory factory;
+    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>> sink;
 
     void SetUp() override
     {
         mapper.addAsset(100);
-        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy>>(0, mapper);
+        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>>(0, mapper, factory);
     }
 
     void TearDown() override { sink.reset(); }
@@ -582,7 +591,8 @@ class ScenarioTest : public ::testing::Test
 {
   protected:
     MockMapper mapper;
-    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy>> sink;
+    MockStrategyFactory factory;
+    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>> sink;
 
     void SetUp() override
     {
@@ -591,7 +601,7 @@ class ScenarioTest : public ::testing::Test
         {
             mapper.addAsset(i);
         }
-        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy>>(0, mapper);
+        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>>(0, mapper, factory);
     }
 
     void TearDown() override { sink.reset(); }
@@ -734,11 +744,12 @@ TEST_F(ScenarioTest, InterleavedAddExecuteCancelSequence)
 class RecoveryTest : public ::testing::Test
 {
   protected:
-    std::unique_ptr<alpbook::nasdaq::Context<MockStrategy>> context;
+    MockStrategyFactory factory;
+    std::unique_ptr<alpbook::nasdaq::Context<MockStrategy, MockStrategyFactory>> context;
 
     void SetUp() override
     {
-        context = std::make_unique<alpbook::nasdaq::Context<MockStrategy>>(100);
+        context = std::make_unique<alpbook::nasdaq::Context<MockStrategy, MockStrategyFactory>>(100, factory);
     }
 
     void TearDown() override { context.reset(); }
@@ -843,13 +854,14 @@ class RecoverySinkTest : public ::testing::Test
 {
   protected:
     MockMapper mapper;
-    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy>> sink;
+    MockStrategyFactory factory;
+    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>> sink;
 
     void SetUp() override
     {
         mapper.addAsset(100);
         mapper.addAsset(101);
-        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy>>(0, mapper);
+        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>>(0, mapper, factory);
     }
 
     void TearDown() override { sink.reset(); }

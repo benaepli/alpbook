@@ -16,8 +16,8 @@ export module alpbook.book.nasdaq;
 export import :state;
 namespace alpbook::nasdaq
 {
-    export constexpr auto DEFAULT_ORDER_POOL_SIZE = 2'000'000;
-    export constexpr auto DEFAULT_BUFFER_POOL_SIZE = 1 << 20;  // 1MB default buffer size
+    export constexpr auto DEFAULT_ORDER_POOL_SIZE = 500'000;
+    export constexpr auto DEFAULT_BUFFER_POOL_SIZE = 32 << 20;  // 32MB default buffer size
 
     export struct AddOrder
     {
@@ -66,7 +66,8 @@ namespace alpbook::nasdaq
     {
     };
 
-    export template<Listener L, uint32_t OrderPoolSize = DEFAULT_ORDER_POOL_SIZE,
+    export template<Listener L,
+                    uint32_t OrderPoolSize = DEFAULT_ORDER_POOL_SIZE,
                     size_t BufferPoolSize = DEFAULT_BUFFER_POOL_SIZE>
     class Book
     {

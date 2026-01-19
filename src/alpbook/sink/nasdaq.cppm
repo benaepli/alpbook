@@ -14,19 +14,20 @@ export module alpbook.sink.nasdaq;
 
 namespace alpbook::nasdaq
 {
-    export template<typename S, bool Benchmark = false>
-        requires strategy::Strategy<S, Book<S>>
+    export template<typename S, typename SF, bool Benchmark = false>
+        requires strategy::Strategy<S, Book<S>> && strategy::StrategyFactory<SF, S, Book<S>>
     struct Context
     {
         using BookType = Book<S>;
 
-        S strategy {};
+        S strategy;
         BookType book;
 
         bool isHealthy_ = true;
 
-        Context(uint16_t id)
-            : book(strategy)
+        Context(uint16_t id, SF& strategyFactory)
+            : strategy(strategyFactory.create(id))
+            , book(strategy)
         {
             strategy.setAsset(id);
             strategy.setBook(&book);
@@ -106,21 +107,22 @@ namespace alpbook::nasdaq
         }
     };
 
-    export template<typename S, bool B = false>
-        requires strategy::Strategy<S, Book<S>>
+    export template<typename S, typename SF, bool B = false>
+        requires strategy::Strategy<S, Book<S>> && strategy::StrategyFactory<SF, S, Book<S>>
     class Sink
     {
-        using Ctx = Context<S, B>;
+        using Ctx = Context<S, SF, B>;
 
       public:
         template<typename Mapper>
             requires EnumerableMapper<Mapper, uint16_t>
-        Sink(uint32_t coreIndex, Mapper const& mapper)
+        Sink(uint32_t coreIndex, Mapper const& mapper, SF strategyFactory)
+            : strategyFactory_(std::move(strategyFactory))
         {
             auto ids = mapper.getIDsForThread(coreIndex);
             for (auto id : ids)
             {
-                contexts_[id] = std::make_unique<Ctx>(id);
+                contexts_[id] = std::make_unique<Ctx>(id, strategyFactory_);
             }
         }
 
@@ -142,6 +144,7 @@ namespace alpbook::nasdaq
         }
 
       private:
+        SF strategyFactory_;
         std::array<std::unique_ptr<Ctx>, 65536> contexts_;
     };
 }  // namespace alpbook::nasdaq

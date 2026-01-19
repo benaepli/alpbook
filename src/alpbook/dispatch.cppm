@@ -3,6 +3,7 @@ module;
 #include <cmath>
 #include <concepts>
 #include <expected>
+#include <print>
 #include <thread>
 
 #include <readerwriterqueue.h>
@@ -188,7 +189,7 @@ namespace alpbook
             std::atomic<bool> running {false};
 
             alignas(std::hardware_destructive_interference_size)
-                moodycamel::ReaderWriterQueue<Slot> queue;
+                moodycamel::ReaderWriterQueue<Slot> queue {16384};
             std::thread thread;
         };
         std::vector<std::unique_ptr<Worker>> workers_ {};

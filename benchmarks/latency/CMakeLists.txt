@@ -15,5 +15,6 @@ target_compile_features(alpbook_latency_benchmark PRIVATE cxx_std_23)
 target_sources(alpbook_latency_benchmark
         PUBLIC
         FILE_SET CXX_MODULES FILES
+        src/sink.cppm
         src/strategy.cppm
 )
