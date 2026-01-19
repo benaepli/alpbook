@@ -14,7 +14,7 @@ export module alpbook.sink.nasdaq;
 
 namespace alpbook::nasdaq
 {
-    template<typename S>
+    export template<typename S, bool Benchmark = false>
         requires strategy::Strategy<S, Book<S>>
     struct Context
     {
@@ -32,21 +32,10 @@ namespace alpbook::nasdaq
             strategy.setBook(&book);
         }
 
-        void add(AddOrder order)
-        {
-            if (!isHealthy_) [[unlikely]]
-            {
-                return;
-            }
-            book.add(order);
-        }
+        void add(AddOrder order) { book.add(order); }
 
         void execute(ExecuteOrder order)
         {
-            if (!isHealthy_) [[unlikely]]
-            {
-                return;
-            }
             auto result = book.execute(order);
             if (!result.has_value()) [[unlikely]]
             {
@@ -56,10 +45,6 @@ namespace alpbook::nasdaq
 
         void reduce(DecrementShares order)
         {
-            if (!isHealthy_) [[unlikely]]
-            {
-                return;
-            }
             auto result = book.reduce(order);
             if (!result.has_value()) [[unlikely]]
             {
@@ -69,10 +54,6 @@ namespace alpbook::nasdaq
 
         void cancel(CancelOrder order)
         {
-            if (!isHealthy_) [[unlikely]]
-            {
-                return;
-            }
             auto result = book.cancel(order);
             if (!result.has_value()) [[unlikely]]
             {
@@ -82,10 +63,6 @@ namespace alpbook::nasdaq
 
         void replace(ReplaceOrder order)
         {
-            if (!isHealthy_) [[unlikely]]
-            {
-                return;
-            }
             auto result = book.replace(order);
             if (!result.has_value()) [[unlikely]]
             {
@@ -93,13 +70,24 @@ namespace alpbook::nasdaq
             }
         }
 
-        void apply(auto const& func)
+        void apply(auto const& func) { func(book); }
+
+        [[nodiscard]] bool handleOrigin(itch::MessageOrigin origin)
         {
-            if (!isHealthy_) [[unlikely]]
+            if (origin == itch::MessageOrigin::SnapshotStart) [[unlikely]]
             {
-                return;
+                recover();
+                return true;
             }
-            func(book);
+            return isHealthy_;
+        }
+
+        void jobStartedAt([[maybe_unused]] uint64_t tsc)
+        {
+            if constexpr (Benchmark)
+            {
+                strategy.jobStartedAt(tsc);
+            }
         }
 
       private:
@@ -109,13 +97,20 @@ namespace alpbook::nasdaq
             strategy.onSystemHalt();
             book.reset();
         }
+
+        void recover()
+        {
+            book.reset();
+            isHealthy_ = true;
+            strategy.onSystemRestart();
+        }
     };
 
-    template<typename S>
+    export template<typename S, bool B = false>
         requires strategy::Strategy<S, Book<S>>
     class Sink
     {
-        using Ctx = Context<S>;
+        using Ctx = Context<S, B>;
 
       public:
         template<typename Mapper>
@@ -129,10 +124,21 @@ namespace alpbook::nasdaq
             }
         }
 
-        void onMessage(itch::ItchSlot data)
+        void onMessage(itch::ItchSlot<B> data)
         {
             auto id = itch::ItchExtractor::extractID(data);
-            itch::parse(data, *contexts_[id]);
+            auto& context = *contexts_[id];
+
+            if (!context.handleOrigin(data.type)) [[unlikely]]
+            {
+                return;
+            }
+
+            if constexpr (B)
+            {
+                context.jobStartedAt(data.dispatchTimestamp);
+            }
+            itch::parse(data.data, context);
         }
 
       private:

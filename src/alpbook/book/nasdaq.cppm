@@ -80,6 +80,7 @@ namespace alpbook::nasdaq
             , bidLevels_(PmrAllocator(&poolResource_))
             , askLevels_(PmrAllocator(&poolResource_))
         {
+            orderToDetails_.reserve(OrderPoolSize);
         }
 
         Book(Book const&) = delete;
