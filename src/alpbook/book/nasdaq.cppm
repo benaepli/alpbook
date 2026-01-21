@@ -9,6 +9,8 @@ import alpbook.internal;
 #include <expected>
 #include <memory_resource>
 
+#include <sys/mman.h>
+
 #include "absl/container/flat_hash_map.h"
 #include "alpbook/internal/hints.hpp"
 
@@ -18,7 +20,7 @@ export import :state;
 namespace alpbook::nasdaq
 {
     export constexpr auto DEFAULT_ORDER_POOL_SIZE = 500'000;
-    export constexpr auto DEFAULT_BUFFER_POOL_SIZE = 32 << 20;  // 32MB default buffer size
+    export constexpr auto DEFAULT_BUFFER_POOL_SIZE = 64 << 20;  // 64MB default buffer size
 
     export struct AddOrder
     {
@@ -67,6 +69,24 @@ namespace alpbook::nasdaq
     {
     };
 
+    template<size_t BufferPoolSize>
+    struct TreeBuffer
+    {
+        TreeBuffer()
+        {
+            madvise(buffer.data(), buffer.size(), MADV_HUGEPAGE);
+
+            // To prevent page faults at runtime
+            std::byte volatile* raw = buffer.data();
+            for (size_t i = 0; i < buffer.size(); i += 4096)
+            {
+                raw[i] = std::byte {1};
+            }
+        }
+
+        std::array<std::byte, BufferPoolSize> buffer {};
+    };
+
     export template<Listener L,
                     uint32_t OrderPoolSize = DEFAULT_ORDER_POOL_SIZE,
                     size_t BufferPoolSize = DEFAULT_BUFFER_POOL_SIZE>
@@ -77,10 +97,11 @@ namespace alpbook::nasdaq
       public:
         Book(L& listener)
             : listener_(&listener)
-            , monotonicResource_(buffer_.data(), buffer_.size())
+            , monotonicResource_(buffer_.buffer.data(), buffer_.buffer.size())
             , poolResource_(&monotonicResource_)
             , bidLevels_(PmrAllocator(&poolResource_))
             , askLevels_(PmrAllocator(&poolResource_))
+            , orderToDetails_(PmrAllocator(&poolResource_))
         {
             orderToDetails_.reserve(OrderPoolSize);
         }
@@ -89,6 +110,13 @@ namespace alpbook::nasdaq
         Book& operator=(Book const&) = delete;
         Book(Book&&) = delete;
         Book& operator=(Book&&) = delete;
+
+        using OrderMap = absl::flat_hash_map<
+            uint64_t,
+            OrderDetails,
+            absl::container_internal::hash_default_hash<uint64_t>,
+            absl::container_internal::hash_default_eq<uint64_t>,
+            std::pmr::polymorphic_allocator<std::pair<uint64_t const, OrderDetails>>>;
 
         void setListener(L& listener) noexcept { listener_ = &listener; }
 
@@ -613,7 +641,7 @@ namespace alpbook::nasdaq
         L* listener_ {};
 
         // Memory resources for allocation
-        alignas(std::max_align_t) std::array<std::byte, BufferPoolSize> buffer_ {};
+        alignas(std::max_align_t) TreeBuffer<BufferPoolSize> buffer_ {};
         std::pmr::monotonic_buffer_resource monotonicResource_;
         std::pmr::unsynchronized_pool_resource poolResource_;
 
@@ -621,7 +649,7 @@ namespace alpbook::nasdaq
         AskMap<PmrAllocator> askLevels_;
 
         internal::ObjectPool<Order> orderPool_ {OrderPoolSize};
-        absl::flat_hash_map<uint64_t, OrderDetails> orderToDetails_ {};
+        OrderMap orderToDetails_ {};
 
         // Cached versions of the best bid and ask
         Level bestBid_ {};
