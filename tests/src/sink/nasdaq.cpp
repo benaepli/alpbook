@@ -49,6 +49,7 @@ struct MockStrategy
     std::vector<BidChangeCall> bidChanges;
     std::vector<AskChangeCall> askChanges;
     bool systemHaltCalled = false;
+    bool recoveryStartCalled = false;
     bool systemRestartCalled = false;
 
     void setAsset(uint16_t id) { assetId = id; }
@@ -67,6 +68,8 @@ struct MockStrategy
 
     void onSystemHalt() { systemHaltCalled = true; }
 
+    void onRecoveryStart() { recoveryStartCalled = true; }
+
     void onSystemRestart() { systemRestartCalled = true; }
 
     void reset()
@@ -75,6 +78,7 @@ struct MockStrategy
         bidChanges.clear();
         askChanges.clear();
         systemHaltCalled = false;
+        recoveryStartCalled = false;
         systemRestartCalled = false;
     }
 };
@@ -84,6 +88,8 @@ struct MockStrategyFactory
     using StrategyType = MockStrategy;
     MockStrategy create(uint16_t) const { return MockStrategy {}; }
 };
+
+using PolicyTypes = ::testing::Types<alpbook::nasdaq::PolicyTree, alpbook::nasdaq::PolicyHash>;
 
 class MockMapper
 {
@@ -197,159 +203,164 @@ namespace TestHelpers
     }
 }  // namespace TestHelpers
 
+template<typename Policy>
 class ContextTest : public ::testing::Test
 {
   protected:
     MockStrategyFactory factory;
-    std::unique_ptr<alpbook::nasdaq::Context<MockStrategy, MockStrategyFactory>> context;
+    std::unique_ptr<alpbook::nasdaq::Context<Policy, MockStrategy, MockStrategyFactory>> context;
 
     void SetUp() override
     {
-        context = std::make_unique<alpbook::nasdaq::Context<MockStrategy, MockStrategyFactory>>(100, factory);
+        context =
+            std::make_unique<alpbook::nasdaq::Context<Policy, MockStrategy, MockStrategyFactory>>(
+                100, factory);
     }
 
     void TearDown() override { context.reset(); }
 };
 
-TEST_F(ContextTest, InitializationSetsAssetId)
+TYPED_TEST_SUITE(ContextTest, PolicyTypes);
+
+TYPED_TEST(ContextTest, InitializationSetsAssetId)
 {
-    EXPECT_EQ(context->strategy.assetId, 100);
+    EXPECT_EQ(this->context->strategy.assetId, 100);
 }
 
-TEST_F(ContextTest, InitializationSetsBookPointer)
+TYPED_TEST(ContextTest, InitializationSetsBookPointer)
 {
-    EXPECT_EQ(context->strategy.bookPtr, &context->book);
+    EXPECT_EQ(this->context->strategy.bookPtr, &this->context->book);
 }
 
-TEST_F(ContextTest, StartsHealthy)
+TYPED_TEST(ContextTest, StartsHealthy)
 {
-    EXPECT_TRUE(context->isHealthy_);
+    EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Normal);
 }
 
-TEST_F(ContextTest, HealthyStateAcceptsAddOrder)
+TYPED_TEST(ContextTest, HealthyStateAcceptsAddOrder)
 {
     AddOrder order {1000, 1, 100, 50, Side::Buy};
-    context->add(order);
+    this->context->add(order);
 
-    auto bestBid = context->book.getBestBid();
+    auto bestBid = this->context->book.getBestBid();
     EXPECT_TRUE(bestBid.isValid());
     EXPECT_EQ(TestHelpers::toU64(bestBid.price), 100u);
     EXPECT_EQ(TestHelpers::toU64(bestBid.quantity), 50u);
 }
 
-TEST_F(ContextTest, HealthyStateExecutesOrder)
+TYPED_TEST(ContextTest, HealthyStateExecutesOrder)
 {
     AddOrder addOrder {1000, 1, 100, 50, Side::Buy};
-    context->add(addOrder);
-    context->strategy.reset();
+    this->context->add(addOrder);
+    this->context->strategy.reset();
 
     ExecuteOrder execOrder {1, 50};
-    context->execute(execOrder);
+    this->context->execute(execOrder);
 
-    EXPECT_EQ(context->strategy.trades.size(), 1u);
-    EXPECT_EQ(TestHelpers::toU64(context->strategy.trades[0].price), 100u);
-    EXPECT_EQ(TestHelpers::toU64(context->strategy.trades[0].qty), 50u);
-    EXPECT_EQ(context->strategy.trades[0].side, Side::Buy);
+    EXPECT_EQ(this->context->strategy.trades.size(), 1u);
+    EXPECT_EQ(TestHelpers::toU64(this->context->strategy.trades[0].price), 100u);
+    EXPECT_EQ(TestHelpers::toU64(this->context->strategy.trades[0].qty), 50u);
+    EXPECT_EQ(this->context->strategy.trades[0].side, Side::Buy);
 }
 
-TEST_F(ContextTest, HealthyStateReducesShares)
+TYPED_TEST(ContextTest, HealthyStateReducesShares)
 {
     AddOrder addOrder {1000, 1, 100, 50, Side::Buy};
-    context->add(addOrder);
-    context->strategy.reset();
+    this->context->add(addOrder);
+    this->context->strategy.reset();
 
     DecrementShares reduceOrder {1, 20};
-    context->reduce(reduceOrder);
+    this->context->reduce(reduceOrder);
 
-    auto bestBid = context->book.getBestBid();
+    auto bestBid = this->context->book.getBestBid();
     EXPECT_EQ(TestHelpers::toU64(bestBid.quantity), 30u);
 }
 
-TEST_F(ContextTest, HealthyStateCancelsOrder)
+TYPED_TEST(ContextTest, HealthyStateCancelsOrder)
 {
     AddOrder addOrder {1000, 1, 100, 50, Side::Buy};
-    context->add(addOrder);
-    context->strategy.reset();
+    this->context->add(addOrder);
+    this->context->strategy.reset();
 
     CancelOrder cancelOrder {1};
-    context->cancel(cancelOrder);
+    this->context->cancel(cancelOrder);
 
-    auto bestBid = context->book.getBestBid();
+    auto bestBid = this->context->book.getBestBid();
     EXPECT_FALSE(bestBid.isValid());
 }
 
-TEST_F(ContextTest, HealthyStateReplacesOrder)
+TYPED_TEST(ContextTest, HealthyStateReplacesOrder)
 {
     AddOrder addOrder {1000, 1, 100, 50, Side::Buy};
-    context->add(addOrder);
-    context->strategy.reset();
+    this->context->add(addOrder);
+    this->context->strategy.reset();
 
     ReplaceOrder replaceOrder {2000, 1, 2, 101, 40};
-    context->replace(replaceOrder);
+    this->context->replace(replaceOrder);
 
-    auto bestBid = context->book.getBestBid();
+    auto bestBid = this->context->book.getBestBid();
     EXPECT_EQ(TestHelpers::toU64(bestBid.price), 101u);
     EXPECT_EQ(TestHelpers::toU64(bestBid.quantity), 40u);
 }
 
-TEST_F(ContextTest, InvalidExecuteTripsCircuitBreaker)
+TYPED_TEST(ContextTest, InvalidExecuteTripsCircuitBreaker)
 {
     // Try to execute non-existent order
     ExecuteOrder execOrder {99999, 10};
-    context->execute(execOrder);
+    this->context->execute(execOrder);
 
-    EXPECT_FALSE(context->isHealthy_);
-    EXPECT_TRUE(context->strategy.systemHaltCalled);
+    EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Failed);
+    EXPECT_TRUE(this->context->strategy.systemHaltCalled);
 }
 
-TEST_F(ContextTest, InvalidReduceTripsCircuitBreaker)
+TYPED_TEST(ContextTest, InvalidReduceTripsCircuitBreaker)
 {
     DecrementShares reduceOrder {99999, 10};
-    context->reduce(reduceOrder);
+    this->context->reduce(reduceOrder);
 
-    EXPECT_FALSE(context->isHealthy_);
-    EXPECT_TRUE(context->strategy.systemHaltCalled);
+    EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Failed);
+    EXPECT_TRUE(this->context->strategy.systemHaltCalled);
 }
 
-TEST_F(ContextTest, InvalidCancelTripsCircuitBreaker)
+TYPED_TEST(ContextTest, InvalidCancelTripsCircuitBreaker)
 {
     CancelOrder cancelOrder {99999};
-    context->cancel(cancelOrder);
+    this->context->cancel(cancelOrder);
 
-    EXPECT_FALSE(context->isHealthy_);
-    EXPECT_TRUE(context->strategy.systemHaltCalled);
+    EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Failed);
+    EXPECT_TRUE(this->context->strategy.systemHaltCalled);
 }
 
-TEST_F(ContextTest, InvalidReplaceTripsCircuitBreaker)
+TYPED_TEST(ContextTest, InvalidReplaceTripsCircuitBreaker)
 {
     ReplaceOrder replaceOrder {2000, 99999, 2, 101, 40};
-    context->replace(replaceOrder);
+    this->context->replace(replaceOrder);
 
-    EXPECT_FALSE(context->isHealthy_);
-    EXPECT_TRUE(context->strategy.systemHaltCalled);
+    EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Failed);
+    EXPECT_TRUE(this->context->strategy.systemHaltCalled);
 }
 
-TEST_F(ContextTest, CircuitBreakerResetsBook)
+TYPED_TEST(ContextTest, CircuitBreakerResetsBook)
 {
     // Add an order first
     AddOrder addOrder {1000, 1, 100, 50, Side::Buy};
-    context->add(addOrder);
+    this->context->add(addOrder);
 
     // Trip circuit breaker
     ExecuteOrder execOrder {99999, 10};
-    context->execute(execOrder);
+    this->context->execute(execOrder);
 
     // Book should be reset (empty)
-    auto bestBid = context->book.getBestBid();
+    auto bestBid = this->context->book.getBestBid();
     EXPECT_FALSE(bestBid.isValid());
 }
 
-TEST_F(ContextTest, ApplyCallsLambdaWhenHealthy)
+TYPED_TEST(ContextTest, ApplyCallsLambdaWhenHealthy)
 {
     bool lambdaCalled = false;
-    alpbook::nasdaq::Book<MockStrategy>* capturedBook = nullptr;
+    alpbook::nasdaq::Book<TypeParam, MockStrategy>* capturedBook = nullptr;
 
-    context->apply(
+    this->context->apply(
         [&](auto& book)
         {
             lambdaCalled = true;
@@ -357,15 +368,16 @@ TEST_F(ContextTest, ApplyCallsLambdaWhenHealthy)
         });
 
     EXPECT_TRUE(lambdaCalled);
-    EXPECT_EQ(capturedBook, &context->book);
+    EXPECT_EQ(capturedBook, &this->context->book);
 }
 
+template<typename Policy>
 class SinkTest : public ::testing::Test
 {
   protected:
     MockMapper mapper;
     MockStrategyFactory factory;
-    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>> sink;
+    std::unique_ptr<alpbook::nasdaq::Sink<Policy, MockStrategy, MockStrategyFactory>> sink;
 
     void SetUp() override
     {
@@ -374,225 +386,233 @@ class SinkTest : public ::testing::Test
         mapper.addAsset(101);
         mapper.addAsset(102);
 
-        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>>(0, mapper, factory);
+        sink = std::make_unique<alpbook::nasdaq::Sink<Policy, MockStrategy, MockStrategyFactory>>(
+            0, mapper, factory);
     }
 
     void TearDown() override { sink.reset(); }
 };
 
-TEST_F(SinkTest, SingleAssetRouting)
+TYPED_TEST_SUITE(SinkTest, PolicyTypes);
+
+TYPED_TEST(SinkTest, SingleAssetRouting)
 {
     auto addMsg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(addMsg);
+    this->sink->onMessage(addMsg);
 
     auto execMsg = TestHelpers::createExecuteOrder(100, 1, 50);
-    sink->onMessage(execMsg);
+    this->sink->onMessage(execMsg);
 
     // Both should route to the same context - no errors expected
     // Success is implicit (no crash/exceptions)
 }
 
-TEST_F(SinkTest, MultiAssetRoutingIsIndependent)
+TYPED_TEST(SinkTest, MultiAssetRoutingIsIndependent)
 {
     // Add orders to different assets
     auto add100 = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
     auto add101 = TestHelpers::createAddOrder(101, 2, 1001, 60, 'B');
     auto add102 = TestHelpers::createAddOrder(102, 3, 1002, 70, 'B');
 
-    sink->onMessage(add100);
-    sink->onMessage(add101);
-    sink->onMessage(add102);
+    this->sink->onMessage(add100);
+    this->sink->onMessage(add101);
+    this->sink->onMessage(add102);
 
     // Execute on asset 101 - should not affect others
     auto exec101 = TestHelpers::createExecuteOrder(101, 2, 60);
-    sink->onMessage(exec101);
+    this->sink->onMessage(exec101);
 
     // Success is implicit - all messages routed correctly
 }
 
-TEST_F(SinkTest, AssetIsolationMaintainsIndependentBooks)
+TYPED_TEST(SinkTest, AssetIsolationMaintainsIndependentBooks)
 {
     // Add buy orders at same price to different assets
     auto add100 = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
     auto add101 = TestHelpers::createAddOrder(101, 2, 1000, 60, 'B');
 
-    sink->onMessage(add100);
-    sink->onMessage(add101);
+    this->sink->onMessage(add100);
+    this->sink->onMessage(add101);
 
     // Execute order on asset 100
     auto exec100 = TestHelpers::createExecuteOrder(100, 1, 50);
-    sink->onMessage(exec100);
+    this->sink->onMessage(exec100);
 
     // Asset 101 should still have its order (verified implicitly by no errors)
     // Can execute it successfully
     auto exec101 = TestHelpers::createExecuteOrder(101, 2, 60);
-    sink->onMessage(exec101);
+    this->sink->onMessage(exec101);
 }
 
-TEST_F(SinkTest, CircuitBreakerIsolationPerAsset)
+TYPED_TEST(SinkTest, CircuitBreakerIsolationPerAsset)
 {
     // Add order to asset 100
     auto add100 = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(add100);
+    this->sink->onMessage(add100);
 
     // Add order to asset 101
     auto add101 = TestHelpers::createAddOrder(101, 2, 1001, 60, 'B');
-    sink->onMessage(add101);
+    this->sink->onMessage(add101);
 
     // Trip circuit breaker on asset 100 (invalid execute)
     auto invalidExec100 = TestHelpers::createExecuteOrder(100, 99999, 10);
-    sink->onMessage(invalidExec100);
+    this->sink->onMessage(invalidExec100);
 
     // Asset 100 should now reject operations
     auto add100Again = TestHelpers::createAddOrder(100, 3, 1002, 70, 'B');
-    sink->onMessage(add100Again);
+    this->sink->onMessage(add100Again);
 
     // Asset 101 should still accept operations
     auto add101Again = TestHelpers::createAddOrder(101, 4, 1003, 80, 'B');
-    sink->onMessage(add101Again);
+    this->sink->onMessage(add101Again);
 
     // Can still execute on asset 101
     auto exec101 = TestHelpers::createExecuteOrder(101, 2, 60);
-    sink->onMessage(exec101);
+    this->sink->onMessage(exec101);
 
     // Success verified implicitly by no crashes
 }
 
+template<typename Policy>
 class ItchIntegrationTest : public ::testing::Test
 {
   protected:
     MockMapper mapper;
     MockStrategyFactory factory;
-    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>> sink;
+    std::unique_ptr<alpbook::nasdaq::Sink<Policy, MockStrategy, MockStrategyFactory>> sink;
 
     void SetUp() override
     {
         mapper.addAsset(100);
-        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>>(0, mapper, factory);
+        sink = std::make_unique<alpbook::nasdaq::Sink<Policy, MockStrategy, MockStrategyFactory>>(
+            0, mapper, factory);
     }
 
     void TearDown() override { sink.reset(); }
 };
 
-TEST_F(ItchIntegrationTest, ParseAddOrderTypeA)
+TYPED_TEST_SUITE(ItchIntegrationTest, PolicyTypes);
+
+TYPED_TEST(ItchIntegrationTest, ParseAddOrderTypeA)
 {
     auto msg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
     msg.data[0] = 'A';
 
-    sink->onMessage(msg);
+    this->sink->onMessage(msg);
 
     // Order should be added (verified implicitly by no errors)
 }
 
-TEST_F(ItchIntegrationTest, ParseAddOrderTypeF)
+TYPED_TEST(ItchIntegrationTest, ParseAddOrderTypeF)
 {
     auto msg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'S');
     msg.data[0] = 'F';
 
-    sink->onMessage(msg);
+    this->sink->onMessage(msg);
 
     // Order should be added
 }
 
-TEST_F(ItchIntegrationTest, ParseExecuteOrderTypeE)
+TYPED_TEST(ItchIntegrationTest, ParseExecuteOrderTypeE)
 {
     // Add order first
     auto addMsg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(addMsg);
+    this->sink->onMessage(addMsg);
 
     // Execute it
     auto execMsg = TestHelpers::createExecuteOrder(100, 1, 50);
     execMsg.data[0] = 'E';
-    sink->onMessage(execMsg);
+    this->sink->onMessage(execMsg);
 
     // Execution should succeed (no errors)
 }
 
-TEST_F(ItchIntegrationTest, ParseExecuteOrderTypeC)
+TYPED_TEST(ItchIntegrationTest, ParseExecuteOrderTypeC)
 {
     // Add order first
     auto addMsg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(addMsg);
+    this->sink->onMessage(addMsg);
 
     // Execute it with type C
     auto execMsg = TestHelpers::createExecuteOrder(100, 1, 30);
     execMsg.data[0] = 'C';
-    sink->onMessage(execMsg);
+    this->sink->onMessage(execMsg);
 
     // Partial execution should succeed
 }
 
-TEST_F(ItchIntegrationTest, ParseCancelOrder)
+TYPED_TEST(ItchIntegrationTest, ParseCancelOrder)
 {
     // Add order first
     auto addMsg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(addMsg);
+    this->sink->onMessage(addMsg);
 
     // Cancel it
     auto cancelMsg = TestHelpers::createCancelOrder(100, 1);
-    sink->onMessage(cancelMsg);
+    this->sink->onMessage(cancelMsg);
 
     // Cancel should succeed
 }
 
-TEST_F(ItchIntegrationTest, ParseReduceOrder)
+TYPED_TEST(ItchIntegrationTest, ParseReduceOrder)
 {
     // Add order first
     auto addMsg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(addMsg);
+    this->sink->onMessage(addMsg);
 
     // Reduce it
     auto reduceMsg = TestHelpers::createReduceOrder(100, 1, 20);
-    sink->onMessage(reduceMsg);
+    this->sink->onMessage(reduceMsg);
 
     // Reduce should succeed
 }
 
-TEST_F(ItchIntegrationTest, ParseReplaceOrder)
+TYPED_TEST(ItchIntegrationTest, ParseReplaceOrder)
 {
     // Add order first
     auto addMsg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(addMsg);
+    this->sink->onMessage(addMsg);
 
     // Replace it
     auto replaceMsg = TestHelpers::createReplaceOrder(100, 1, 2, 1001, 40);
-    sink->onMessage(replaceMsg);
+    this->sink->onMessage(replaceMsg);
 
     // Replace should succeed
 }
 
-TEST_F(ItchIntegrationTest, ParseUnknownMessageTypeIgnored)
+TYPED_TEST(ItchIntegrationTest, ParseUnknownMessageTypeIgnored)
 {
     ItchSlot<> msg {};
     msg.data[0] = 'Z';  // Unknown type
     TestHelpers::writeField(msg, 1, uint16_t(100));
 
     // Should not crash
-    sink->onMessage(msg);
+    this->sink->onMessage(msg);
 }
 
-TEST_F(ItchIntegrationTest, SideEncodingBuyIsParsedCorrectly)
+TYPED_TEST(ItchIntegrationTest, SideEncodingBuyIsParsedCorrectly)
 {
     auto msg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(msg);
+    this->sink->onMessage(msg);
 
     // Buy order should be added (verified implicitly)
 }
 
-TEST_F(ItchIntegrationTest, SideEncodingSellIsParsedCorrectly)
+TYPED_TEST(ItchIntegrationTest, SideEncodingSellIsParsedCorrectly)
 {
     auto msg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'S');
-    sink->onMessage(msg);
+    this->sink->onMessage(msg);
 
     // Sell order should be added
 }
 
+template<typename Policy>
 class ScenarioTest : public ::testing::Test
 {
   protected:
     MockMapper mapper;
     MockStrategyFactory factory;
-    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>> sink;
+    std::unique_ptr<alpbook::nasdaq::Sink<Policy, MockStrategy, MockStrategyFactory>> sink;
 
     void SetUp() override
     {
@@ -601,73 +621,76 @@ class ScenarioTest : public ::testing::Test
         {
             mapper.addAsset(i);
         }
-        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>>(0, mapper, factory);
+        sink = std::make_unique<alpbook::nasdaq::Sink<Policy, MockStrategy, MockStrategyFactory>>(
+            0, mapper, factory);
     }
 
     void TearDown() override { sink.reset(); }
 };
 
-TEST_F(ScenarioTest, ComplexMultiAssetSequence)
+TYPED_TEST_SUITE(ScenarioTest, PolicyTypes);
+
+TYPED_TEST(ScenarioTest, ComplexMultiAssetSequence)
 {
     // Asset 100: Add buy order
     auto add100 = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(add100);
+    this->sink->onMessage(add100);
 
     // Asset 101: Add sell order
     auto add101 = TestHelpers::createAddOrder(101, 2, 1001, 60, 'S');
-    sink->onMessage(add101);
+    this->sink->onMessage(add101);
 
     // Asset 102: Add buy order
     auto add102 = TestHelpers::createAddOrder(102, 3, 1002, 70, 'B');
-    sink->onMessage(add102);
+    this->sink->onMessage(add102);
 
     // Asset 100: Execute partial
     auto exec100 = TestHelpers::createExecuteOrder(100, 1, 20);
-    sink->onMessage(exec100);
+    this->sink->onMessage(exec100);
 
     // Asset 101: Reduce
     auto reduce101 = TestHelpers::createReduceOrder(101, 2, 10);
-    sink->onMessage(reduce101);
+    this->sink->onMessage(reduce101);
 
     // Asset 102: Cancel
     auto cancel102 = TestHelpers::createCancelOrder(102, 3);
-    sink->onMessage(cancel102);
+    this->sink->onMessage(cancel102);
 
     // Asset 103: Add and replace
     auto add103 = TestHelpers::createAddOrder(103, 4, 1003, 80, 'B');
-    sink->onMessage(add103);
+    this->sink->onMessage(add103);
     auto replace103 = TestHelpers::createReplaceOrder(103, 4, 5, 1004, 90);
-    sink->onMessage(replace103);
+    this->sink->onMessage(replace103);
 
     // All operations should complete successfully
 }
 
-TEST_F(ScenarioTest, CircuitBreakerRecoveryIsolation)
+TYPED_TEST(ScenarioTest, CircuitBreakerRecoveryIsolation)
 {
     // Asset 100: Add order and trigger error
     auto add100 = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(add100);
+    this->sink->onMessage(add100);
     auto invalidExec100 = TestHelpers::createExecuteOrder(100, 99999, 10);
-    sink->onMessage(invalidExec100);
+    this->sink->onMessage(invalidExec100);
 
     // Asset 100: Attempt more operations (should be rejected)
     auto add100Again = TestHelpers::createAddOrder(100, 2, 1001, 60, 'B');
-    sink->onMessage(add100Again);
+    this->sink->onMessage(add100Again);
 
     // Asset 101: Add order and execute successfully
     auto add101 = TestHelpers::createAddOrder(101, 3, 1002, 70, 'B');
-    sink->onMessage(add101);
+    this->sink->onMessage(add101);
     auto exec101 = TestHelpers::createExecuteOrder(101, 3, 70);
-    sink->onMessage(exec101);
+    this->sink->onMessage(exec101);
 
     // Asset 101: Continue trading normally
     auto add101Again = TestHelpers::createAddOrder(101, 4, 1003, 80, 'B');
-    sink->onMessage(add101Again);
+    this->sink->onMessage(add101Again);
 
     // Success verified implicitly - asset 101 continues working
 }
 
-TEST_F(ScenarioTest, StressTestMultipleAssets)
+TYPED_TEST(ScenarioTest, StressTestMultipleAssets)
 {
     // Create messages for 100 assets (only first 5 configured in mapper)
     for (uint16_t assetId = 100; assetId < 200; assetId++)
@@ -676,7 +699,7 @@ TEST_F(ScenarioTest, StressTestMultipleAssets)
         {
             // Only configured assets should be processed
             auto addMsg = TestHelpers::createAddOrder(assetId, assetId, 1000, 50, 'B');
-            sink->onMessage(addMsg);
+            this->sink->onMessage(addMsg);
         }
     }
 
@@ -684,184 +707,160 @@ TEST_F(ScenarioTest, StressTestMultipleAssets)
     for (uint16_t assetId = 100; assetId < 105; assetId++)
     {
         auto execMsg = TestHelpers::createExecuteOrder(assetId, assetId, 25);
-        sink->onMessage(execMsg);
+        this->sink->onMessage(execMsg);
 
         auto reduceMsg = TestHelpers::createReduceOrder(assetId, assetId, 10);
-        sink->onMessage(reduceMsg);
+        this->sink->onMessage(reduceMsg);
 
         auto cancelMsg = TestHelpers::createCancelOrder(assetId, assetId);
-        sink->onMessage(cancelMsg);
+        this->sink->onMessage(cancelMsg);
     }
 
     // All messages should be processed without state leakage
 }
 
-TEST_F(ScenarioTest, TimePriorityLostOnReplace)
+TYPED_TEST(ScenarioTest, TimePriorityLostOnReplace)
 {
     // Add first order
     auto add1 = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(add1);
+    this->sink->onMessage(add1);
 
     // Add second order at same price
     auto add2 = TestHelpers::createAddOrder(100, 2, 1000, 30, 'B');
-    sink->onMessage(add2);
+    this->sink->onMessage(add2);
 
     // Replace first order - should lose time priority
     auto replace1 = TestHelpers::createReplaceOrder(100, 1, 3, 1000, 40);
-    sink->onMessage(replace1);
+    this->sink->onMessage(replace1);
 
     // Order 3 (replacement) should now be behind order 2 in queue
     // This is verified implicitly by the replace completing successfully
 }
 
-TEST_F(ScenarioTest, InterleavedAddExecuteCancelSequence)
+TYPED_TEST(ScenarioTest, InterleavedAddExecuteCancelSequence)
 {
     // Interleave operations across multiple assets
     auto add100 = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(add100);
+    this->sink->onMessage(add100);
 
     auto add101 = TestHelpers::createAddOrder(101, 2, 1001, 60, 'S');
-    sink->onMessage(add101);
+    this->sink->onMessage(add101);
 
     auto exec100 = TestHelpers::createExecuteOrder(100, 1, 25);
-    sink->onMessage(exec100);
+    this->sink->onMessage(exec100);
 
     auto add102 = TestHelpers::createAddOrder(102, 3, 1002, 70, 'B');
-    sink->onMessage(add102);
+    this->sink->onMessage(add102);
 
     auto cancel101 = TestHelpers::createCancelOrder(101, 2);
-    sink->onMessage(cancel101);
+    this->sink->onMessage(cancel101);
 
     auto exec100Again = TestHelpers::createExecuteOrder(100, 1, 25);
-    sink->onMessage(exec100Again);
+    this->sink->onMessage(exec100Again);
 
     auto cancel102 = TestHelpers::createCancelOrder(102, 3);
-    sink->onMessage(cancel102);
+    this->sink->onMessage(cancel102);
 
     // All operations should complete in order
 }
 
+template<typename Policy>
 class RecoveryTest : public ::testing::Test
 {
   protected:
     MockStrategyFactory factory;
-    std::unique_ptr<alpbook::nasdaq::Context<MockStrategy, MockStrategyFactory>> context;
+    std::unique_ptr<alpbook::nasdaq::Context<Policy, MockStrategy, MockStrategyFactory>> context;
 
     void SetUp() override
     {
-        context = std::make_unique<alpbook::nasdaq::Context<MockStrategy, MockStrategyFactory>>(100, factory);
+        context =
+            std::make_unique<alpbook::nasdaq::Context<Policy, MockStrategy, MockStrategyFactory>>(
+                100, factory);
     }
 
     void TearDown() override { context.reset(); }
 };
 
-TEST_F(RecoveryTest, SnapshotStartTriggersRecoveryAndRestoresHealth)
+TYPED_TEST_SUITE(RecoveryTest, PolicyTypes);
+
+TYPED_TEST(RecoveryTest, SnapshotStartTriggersRecoveryAndRestoresHealth)
 {
     // Trip circuit breaker
     ExecuteOrder execOrder {99999, 10};
-    context->execute(execOrder);
-    EXPECT_FALSE(context->isHealthy_);
-    EXPECT_TRUE(context->strategy.systemHaltCalled);
+    this->context->execute(execOrder);
+    EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Failed);
+    EXPECT_TRUE(this->context->strategy.systemHaltCalled);
 
     // Trigger recovery with SnapshotStart
-    bool result = context->handleOrigin(MessageOrigin::SnapshotStart);
+    bool result = this->context->handleOrigin(MessageOrigin::SnapshotStart);
 
     EXPECT_TRUE(result);
-    EXPECT_TRUE(context->isHealthy_);
-    EXPECT_TRUE(context->strategy.systemRestartCalled);
+    EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Recovering);
+    EXPECT_TRUE(this->context->strategy.recoveryStartCalled);
 }
 
-TEST_F(RecoveryTest, RecoveryClearsBookState)
+TYPED_TEST(RecoveryTest, RecoveryClearsBookState)
 {
     // Add an order
     AddOrder addOrder {1000, 1, 100, 50, Side::Buy};
-    context->add(addOrder);
-    auto bestBid = context->book.getBestBid();
+    this->context->add(addOrder);
+    auto bestBid = this->context->book.getBestBid();
     EXPECT_TRUE(bestBid.isValid());
 
     // Trigger recovery
-    [[maybe_unused]] auto recovered = context->handleOrigin(MessageOrigin::SnapshotStart);
+    [[maybe_unused]] auto recovered = this->context->handleOrigin(MessageOrigin::SnapshotStart);
 
     // Book should be cleared
-    bestBid = context->book.getBestBid();
+    bestBid = this->context->book.getBestBid();
     EXPECT_FALSE(bestBid.isValid());
 }
 
-TEST_F(RecoveryTest, RecoveryAllowsNewOrdersAfterCircuitBreaker)
+TYPED_TEST(RecoveryTest, RecoveryAllowsNewOrdersAfterCircuitBreaker)
 {
     // Trip circuit breaker
     ExecuteOrder execOrder {99999, 10};
-    context->execute(execOrder);
-    EXPECT_FALSE(context->isHealthy_);
+    this->context->execute(execOrder);
+    EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Failed);
 
     // Trigger recovery
-    [[maybe_unused]] auto recovered = context->handleOrigin(MessageOrigin::SnapshotStart);
+    [[maybe_unused]] auto recovered = this->context->handleOrigin(MessageOrigin::SnapshotStart);
 
     // Should be able to add new orders
     AddOrder addOrder {1000, 1, 100, 50, Side::Buy};
-    context->add(addOrder);
+    this->context->add(addOrder);
 
-    auto bestBid = context->book.getBestBid();
+    auto bestBid = this->context->book.getBestBid();
     EXPECT_TRUE(bestBid.isValid());
     EXPECT_EQ(TestHelpers::toU64(bestBid.price), 100u);
 }
 
-TEST_F(RecoveryTest, HandleOriginReturnsFalseForNonSnapshotWhenUnhealthy)
+TYPED_TEST(RecoveryTest, HandleOriginReturnsFalseForNonSnapshotWhenUnhealthy)
 {
     // Trip circuit breaker
     ExecuteOrder execOrder {99999, 10};
-    context->execute(execOrder);
-    EXPECT_FALSE(context->isHealthy_);
+    this->context->execute(execOrder);
+    EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Failed);
 
     // Test all non-SnapshotStart origins return false when unhealthy
-    EXPECT_FALSE(context->handleOrigin(MessageOrigin::Live));
-    EXPECT_FALSE(context->handleOrigin(MessageOrigin::Recovery));
-    EXPECT_FALSE(context->handleOrigin(MessageOrigin::SnapshotEnd));
+    EXPECT_FALSE(this->context->handleOrigin(MessageOrigin::Live));
+    EXPECT_FALSE(this->context->handleOrigin(MessageOrigin::Recovery));
+    EXPECT_FALSE(this->context->handleOrigin(MessageOrigin::SnapshotEnd));
 }
 
-TEST_F(RecoveryTest, HandleOriginReturnsTrueForAllMessagesWhenHealthy)
-{
-    // Context starts healthy
-    EXPECT_TRUE(context->isHealthy_);
-
-    // All message origins should return true when healthy
-    EXPECT_TRUE(context->handleOrigin(MessageOrigin::Live));
-    EXPECT_TRUE(context->handleOrigin(MessageOrigin::Recovery));
-    EXPECT_TRUE(context->handleOrigin(MessageOrigin::SnapshotStart));
-    EXPECT_TRUE(context->handleOrigin(MessageOrigin::SnapshotEnd));
-}
-
-TEST_F(RecoveryTest, RecoveryIsIdempotent)
-{
-    // Trigger recovery multiple times
-    [[maybe_unused]] auto first = context->handleOrigin(MessageOrigin::SnapshotStart);
-    EXPECT_TRUE(context->isHealthy_);
-
-    context->strategy.reset();
-    [[maybe_unused]] auto second = context->handleOrigin(MessageOrigin::SnapshotStart);
-    EXPECT_TRUE(context->isHealthy_);
-    EXPECT_TRUE(context->strategy.systemRestartCalled);
-
-    // Should still be able to add orders
-    AddOrder addOrder {1000, 1, 100, 50, Side::Buy};
-    context->add(addOrder);
-
-    auto bestBid = context->book.getBestBid();
-    EXPECT_TRUE(bestBid.isValid());
-}
-
+template<typename Policy>
 class RecoverySinkTest : public ::testing::Test
 {
   protected:
     MockMapper mapper;
     MockStrategyFactory factory;
-    std::unique_ptr<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>> sink;
+    std::unique_ptr<alpbook::nasdaq::Sink<Policy, MockStrategy, MockStrategyFactory>> sink;
 
     void SetUp() override
     {
         mapper.addAsset(100);
         mapper.addAsset(101);
-        sink = std::make_unique<alpbook::nasdaq::Sink<MockStrategy, MockStrategyFactory>>(0, mapper, factory);
+        sink = std::make_unique<alpbook::nasdaq::Sink<Policy, MockStrategy, MockStrategyFactory>>(
+            0, mapper, factory);
     }
 
     void TearDown() override { sink.reset(); }
@@ -876,86 +875,88 @@ class RecoverySinkTest : public ::testing::Test
     }
 };
 
-TEST_F(RecoverySinkTest, RecoveryWorksEndToEndThroughSink)
+TYPED_TEST_SUITE(RecoverySinkTest, PolicyTypes);
+
+TYPED_TEST(RecoverySinkTest, RecoveryWorksEndToEndThroughSink)
 {
     // Add order to asset 100
     auto addMsg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(addMsg);
+    this->sink->onMessage(addMsg);
 
     // Trip circuit breaker
     auto invalidExec = TestHelpers::createExecuteOrder(100, 99999, 10);
-    sink->onMessage(invalidExec);
+    this->sink->onMessage(invalidExec);
 
     // Attempt to add order (should be rejected)
     auto addMsg2 = TestHelpers::createAddOrder(100, 2, 1001, 60, 'B');
-    sink->onMessage(addMsg2);
+    this->sink->onMessage(addMsg2);
 
     // Send SnapshotStart to trigger recovery
-    auto snapshotMsg = createSnapshotStart(100);
-    sink->onMessage(snapshotMsg);
+    auto snapshotMsg = this->createSnapshotStart(100);
+    this->sink->onMessage(snapshotMsg);
 
     // Should now be able to add orders again
     auto addMsg3 = TestHelpers::createAddOrder(100, 3, 1002, 70, 'B');
-    sink->onMessage(addMsg3);
+    this->sink->onMessage(addMsg3);
 
     // Verify by executing the order (would fail if not added)
     auto execMsg = TestHelpers::createExecuteOrder(100, 3, 70);
-    sink->onMessage(execMsg);
+    this->sink->onMessage(execMsg);
 }
 
-TEST_F(RecoverySinkTest, RecoveryIsIsolatedPerAsset)
+TYPED_TEST(RecoverySinkTest, RecoveryIsIsolatedPerAsset)
 {
     // Trip circuit breaker on asset 100
     auto invalidExec100 = TestHelpers::createExecuteOrder(100, 99999, 10);
-    sink->onMessage(invalidExec100);
+    this->sink->onMessage(invalidExec100);
 
     // Add order to asset 101 (should work)
     auto add101 = TestHelpers::createAddOrder(101, 1, 1000, 50, 'B');
-    sink->onMessage(add101);
+    this->sink->onMessage(add101);
 
     // Recover asset 100
-    auto snapshot100 = createSnapshotStart(100);
-    sink->onMessage(snapshot100);
+    auto snapshot100 = this->createSnapshotStart(100);
+    this->sink->onMessage(snapshot100);
 
     // Both assets should now be healthy
     auto add100 = TestHelpers::createAddOrder(100, 2, 1001, 60, 'B');
-    sink->onMessage(add100);
+    this->sink->onMessage(add100);
 
     auto exec100 = TestHelpers::createExecuteOrder(100, 2, 60);
-    sink->onMessage(exec100);
+    this->sink->onMessage(exec100);
 
     auto exec101 = TestHelpers::createExecuteOrder(101, 1, 50);
-    sink->onMessage(exec101);
+    this->sink->onMessage(exec101);
 
     // All operations should succeed
 }
 
-TEST_F(RecoverySinkTest, CanTripCircuitBreakerAgainAfterRecovery)
+TYPED_TEST(RecoverySinkTest, CanTripCircuitBreakerAgainAfterRecovery)
 {
     // Trip circuit breaker
     auto invalidExec = TestHelpers::createExecuteOrder(100, 99999, 10);
-    sink->onMessage(invalidExec);
+    this->sink->onMessage(invalidExec);
 
     // Recover
-    auto snapshot = createSnapshotStart(100);
-    sink->onMessage(snapshot);
+    auto snapshot = this->createSnapshotStart(100);
+    this->sink->onMessage(snapshot);
 
     // Add an order
     auto addMsg = TestHelpers::createAddOrder(100, 1, 1000, 50, 'B');
-    sink->onMessage(addMsg);
+    this->sink->onMessage(addMsg);
 
     // Trip circuit breaker again
     auto invalidExec2 = TestHelpers::createExecuteOrder(100, 99999, 10);
-    sink->onMessage(invalidExec2);
+    this->sink->onMessage(invalidExec2);
 
     // Should be unhealthy again
     auto addMsg2 = TestHelpers::createAddOrder(100, 2, 1001, 60, 'B');
-    sink->onMessage(addMsg2);
+    this->sink->onMessage(addMsg2);
 
     // Can recover again
-    auto snapshot2 = createSnapshotStart(100);
-    sink->onMessage(snapshot2);
+    auto snapshot2 = this->createSnapshotStart(100);
+    this->sink->onMessage(snapshot2);
 
     auto addMsg3 = TestHelpers::createAddOrder(100, 3, 1002, 70, 'B');
-    sink->onMessage(addMsg3);
+    this->sink->onMessage(addMsg3);
 }

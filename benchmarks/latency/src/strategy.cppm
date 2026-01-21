@@ -118,8 +118,9 @@ namespace alpbook_latency
         size_t messagesSeen_ = 0;
     };
 
-    static_assert(
-        alpbook::strategy::Strategy<BenchmarkStrategy, alpbook::nasdaq::Book<BenchmarkStrategy>>);
+    static_assert(alpbook::strategy::Strategy<
+                  BenchmarkStrategy,
+                  alpbook::nasdaq::Book<alpbook::nasdaq::PolicyHash, BenchmarkStrategy>>);
 
     export class BenchmarkStrategyFactory
     {
@@ -137,8 +138,9 @@ namespace alpbook_latency
         BenchmarkData* data_;
     };
 
-    static_assert(alpbook::strategy::StrategyFactory<BenchmarkStrategyFactory,
-                                                     BenchmarkStrategy,
-                                                     alpbook::nasdaq::Book<BenchmarkStrategy>>);
+    static_assert(alpbook::strategy::StrategyFactory<
+                  BenchmarkStrategyFactory,
+                  BenchmarkStrategy,
+                  alpbook::nasdaq::Book<alpbook::nasdaq::PolicyHash, BenchmarkStrategy>>);
 
 }  // namespace alpbook_latency

@@ -1,5 +1,6 @@
 module;
 
+#include <concepts>
 #include <cstdint>
 #include <utility>
 
@@ -81,6 +82,24 @@ namespace alpbook::nasdaq
     {
     };
 
+    template<typename T>
+    concept BookStorage = requires(T s,
+                                   uint64_t price,
+                                   uint32_t depth,
+                                   PriceLevel pl,
+                                   PriceLevel (*visitor)(PriceLevel const&)) {
+        { s.reset() } -> std::same_as<void>;
+
+        { s.template getLevelAtDepth<Side::Buy>(depth) } -> std::same_as<Level>;
+        { s.template getVolumeAhead<Side::Buy>(price) } -> std::convertible_to<uint64_t>;
+        { s.template hasLevel<Side::Buy>(price) } -> std::same_as<bool>;
+        { s.template getBest<Side::Buy>() } -> std::same_as<Level>;
+
+        s.template insertNewLevel<Side::Buy>(price, pl);
+        s.template eraseLevel<Side::Buy>(price);
+        s.template updateLevel<Side::Buy>(price, visitor);
+    };
+
     export template<typename Allocator>
     struct TreeStorage
     {
@@ -117,15 +136,61 @@ namespace alpbook::nasdaq
         }
 
         template<Side S>
-        Level getBest() const
+        auto const& getLevels() const
         {
-            auto const& levels = (S == Side::Buy ? bidLevels_ : askLevels_);
+            if constexpr (S == Side::Buy)
+            {
+                return bidLevels_;
+            }
+            else
+            {
+                return askLevels_;
+            }
+        }
+
+      private:
+        // Generic helpers that work with any OrderBookTree type
+        template<typename LevelMap>
+        static Level getBestImpl(LevelMap const& levels)
+        {
             auto it = levels.begin();
             if (it == levels.end())
             {
                 return Level {};
             }
             return {it->first, it->second.totalShares};
+        }
+
+        template<typename LevelMap>
+        static uint64_t getVolumeAheadImpl(LevelMap const& levels, uint64_t price)
+        {
+            auto it = levels.lower_bound(price);
+            return levels.sum_exclusive(it);
+        }
+
+        template<typename LevelMap>
+        static Level getLevelAtDepthImpl(LevelMap const& levels, uint32_t depth)
+        {
+            if (depth >= levels.size())
+            {
+                return Level {};
+            }
+            auto it = levels.find_index(depth);
+            return {it->first, it->second.totalShares};
+        }
+
+      public:
+        template<Side S>
+        Level getBest() const
+        {
+            if constexpr (S == Side::Buy)
+            {
+                return getBestImpl(bidLevels_);
+            }
+            else
+            {
+                return getBestImpl(askLevels_);
+            }
         }
 
         template<Side S>
@@ -150,36 +215,29 @@ namespace alpbook::nasdaq
         ALPBOOK_INLINE void updateLevel(uint64_t price, Visitor&& visitor)
         {
             getLevels<S>().update_key(price,
-                                      [&](PriceLevel const& current)
-                                      {
-                                          PriceLevel copy = current;
-                                          visitor(copy);
-                                          return copy;
-                                      });
+                                      [&](PriceLevel const& current) { return visitor(current); });
         }
 
         template<Side S>
         uint64_t getVolumeAhead(uint64_t price) const
         {
-            auto const& levels = (S == Side::Buy ? bidLevels_ : askLevels_);
-            auto it = levels.lower_bound(price);
-            return levels.sum_exclusive(it);
+            if constexpr (S == Side::Buy)
+                return getVolumeAheadImpl(bidLevels_, price);
+            else
+                return getVolumeAheadImpl(askLevels_, price);
         }
 
         template<Side S>
         Level getLevelAtDepth(uint32_t depth) const
         {
-            auto const& levels = (S == Side::Buy ? bidLevels_ : askLevels_);
-            if (depth >= levels.size())
-            {
-                return Level {};
-            }
-            auto it = levels.find_index(depth);
-            return {it->first, it->second.totalShares};
+            if constexpr (S == Side::Buy)
+                return getLevelAtDepthImpl(bidLevels_, depth);
+            else
+                return getLevelAtDepthImpl(askLevels_, depth);
         }
     };
 
-    export template<typename Allocator>
+    export template<typename Allocator, uint32_t LevelPoolSize = 50'000>
     struct HashStorage
     {
         using LevelMap = absl::flat_hash_map<uint64_t,
@@ -195,14 +253,14 @@ namespace alpbook::nasdaq
         LevelMap askData_;
         BidSet bidOrder_;
         AskSet askOrder_;
-        internal::ObjectPool<PriceLevel> levelPool_;
+        internal::ObjectPool<PriceLevel, std::pmr::polymorphic_allocator<PriceLevel>> levelPool_;
 
-        HashStorage(Allocator alloc, uint32_t poolSize = 50'000)
+        HashStorage(Allocator alloc)
             : bidData_(alloc)
             , askData_(alloc)
             , bidOrder_(alloc)
             , askOrder_(alloc)
-            , levelPool_(poolSize)
+            , levelPool_(LevelPoolSize, alloc)
         {
         }
 
@@ -218,23 +276,68 @@ namespace alpbook::nasdaq
         PriceLevel& getLevel(uint32_t idx) { return levelPool_[idx]; }
         PriceLevel const& getLevel(uint32_t idx) const { return levelPool_[idx]; }
 
-        template<Side S>
-        Level getBest() const
+      private:
+        // Generic helpers for btree_set iteration
+        template<typename OrderSet, typename DataMap>
+        Level getBestImpl(OrderSet const& orderSet, DataMap const& dataMap) const
         {
-            auto const& set = (S == Side::Buy ? bidOrder_ : askOrder_);
-            if (set.empty())
+            if (orderSet.empty())
             {
                 return Level {};
             }
 
-            uint64_t price = *set.begin();
-
-            uint32_t idx = (S == Side::Buy ? bidData_ : askData_).find(price)->second;
+            uint64_t price = *orderSet.begin();
+            uint32_t idx = dataMap.find(price)->second;
             return {price, getLevel(idx).totalShares};
         }
 
+        template<typename OrderSet, typename DataMap, typename CompareLess>
+        uint64_t getVolumeAheadImpl(OrderSet const& orderSet,
+                                    DataMap const& dataMap,
+                                    uint64_t price,
+                                    CompareLess compareLess) const
+        {
+            uint64_t volume = 0;
+            for (uint64_t p : orderSet)
+            {
+                if (p == price)
+                    break;
+                if (compareLess(p, price))
+                    break;
+
+                uint32_t idx = dataMap.find(p)->second;
+                volume += levelPool_[idx].totalShares;
+            }
+            return volume;
+        }
+
+        template<typename OrderSet, typename DataMap>
+        Level getLevelAtDepthImpl(OrderSet const& orderSet,
+                                  DataMap const& dataMap,
+                                  uint32_t depth) const
+        {
+            if (depth >= orderSet.size())
+            {
+                return Level {};
+            }
+            auto it = std::next(orderSet.begin(), depth);
+            uint64_t price = *it;
+            uint32_t idx = dataMap.find(price)->second;
+            return {price, getLevel(idx).totalShares};
+        }
+
+      public:
         template<Side S>
-        bool hasLevel(uint64_t price) const
+        Level getBest() const
+        {
+            if constexpr (S == Side::Buy)
+                return getBestImpl(bidOrder_, bidData_);
+            else
+                return getBestImpl(askOrder_, askData_);
+        }
+
+        template<Side S>
+        ALPBOOK_INLINE bool hasLevel(uint64_t price) const
         {
             if constexpr (S == Side::Buy)
             {
@@ -247,7 +350,7 @@ namespace alpbook::nasdaq
         }
 
         template<Side S>
-        void insertNewLevel(uint64_t price, PriceLevel const& level)
+        ALPBOOK_INLINE void insertNewLevel(uint64_t price, PriceLevel const& level)
         {
             auto idx = levelPool_.allocate();
             levelPool_[idx] = level;
@@ -265,7 +368,7 @@ namespace alpbook::nasdaq
         }
 
         template<Side S>
-        void eraseLevel(uint64_t price)
+        ALPBOOK_INLINE void eraseLevel(uint64_t price)
         {
             auto& data = (S == Side::Buy ? bidData_ : askData_);
 
@@ -302,51 +405,29 @@ namespace alpbook::nasdaq
         template<Side S>
         uint64_t getVolumeAhead(uint64_t price) const
         {
-            uint64_t volume = 0;
-            auto const& orderSet = (S == Side::Buy ? bidOrder_ : askOrder_);
-            auto const& dataMap = (S == Side::Buy ? bidData_ : askData_);
-
-            for (uint64_t p : orderSet)
+            if constexpr (S == Side::Buy)
             {
-                if (p == price)
-                {
-                    break;
-                }
-
-                if constexpr (S == Side::Buy)
-                {
-                    if (p < price)
-                    {
-                        break;
-                    }
-                }
-                else
-                {
-                    if (p > price)
-                    {
-                        break;
-                    }
-                }
-
-                uint32_t idx = dataMap.find(p)->second;
-                volume += levelPool_[idx].totalShares;
+                return getVolumeAheadImpl(bidOrder_,
+                                          bidData_,
+                                          price,
+                                          [](uint64_t p, uint64_t target) { return p < target; });
             }
-
-            return volume;
+            else
+            {
+                return getVolumeAheadImpl(askOrder_,
+                                          askData_,
+                                          price,
+                                          [](uint64_t p, uint64_t target) { return p > target; });
+            }
         }
 
         template<Side S>
         Level getLevelAtDepth(uint32_t depth) const
         {
-            auto const& orderSet = (S == Side::Buy ? bidOrder_ : askOrder_);
-            if (depth >= orderSet.size())
-            {
-                return Level {};
-            }
-            auto it = std::next(orderSet.begin(), depth);
-            uint64_t price = *it;
-            uint32_t idx = (S == Side::Buy ? bidData_ : askData_).find(price)->second;
-            return {price, getLevel(idx).totalShares};
+            if constexpr (S == Side::Buy)
+                return getLevelAtDepthImpl(bidOrder_, bidData_, depth);
+            else
+                return getLevelAtDepthImpl(askOrder_, askData_, depth);
         }
     };
 }  // namespace alpbook::nasdaq

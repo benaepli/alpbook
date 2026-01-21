@@ -25,10 +25,12 @@ namespace
     };
 
     // For mutation benchmarks with smaller workloads
-    using BenchBook_Mutation = alpbook::nasdaq::Book<NoOpListener, 15'000>;
+    using BenchBook_Mutation =
+        alpbook::nasdaq::Book<alpbook::nasdaq::PolicyHash, NoOpListener, 15'000>;
 
     // For query benchmarks with larger workloads
-    using BenchBook_Query = alpbook::nasdaq::Book<NoOpListener, 150'000>;
+    using BenchBook_Query =
+        alpbook::nasdaq::Book<alpbook::nasdaq::PolicyHash, NoOpListener, 150'000>;
 
     class OrderIdGenerator
     {

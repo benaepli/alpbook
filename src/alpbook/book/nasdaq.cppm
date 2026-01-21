@@ -19,8 +19,23 @@ export module alpbook.book.nasdaq;
 export import :state;
 namespace alpbook::nasdaq
 {
-    export constexpr auto DEFAULT_ORDER_POOL_SIZE = 500'000;
-    export constexpr auto DEFAULT_BUFFER_POOL_SIZE = 64 << 20;  // 64MB default buffer size
+    export constexpr auto DEFAULT_ORDER_POOL_SIZE = 100'000;
+    export constexpr auto DEFAULT_LEVEL_POOL_SIZE = 5'000;
+
+    template<typename Policy>
+    struct PolicyTraits;
+
+    template<>
+    struct PolicyTraits<PolicyTree>
+    {
+        static constexpr size_t DefaultBufferSize = 16 << 20;
+    };
+
+    template<>
+    struct PolicyTraits<PolicyHash>
+    {
+        static constexpr size_t DefaultBufferSize = 16 << 20;
+    };
 
     export struct AddOrder
     {
@@ -70,19 +85,19 @@ namespace alpbook::nasdaq
     };
 
     /// Maps storage policy to storage type.
-    template<typename Policy, typename Allocator>
+    template<typename Policy, typename Allocator, uint32_t LevelPoolSize>
     struct StorageSelector;
 
-    template<typename Allocator>
-    struct StorageSelector<PolicyTree, Allocator>
+    template<typename Allocator, uint32_t LevelPoolSize>
+    struct StorageSelector<PolicyTree, Allocator, LevelPoolSize>
     {
         using Type = TreeStorage<Allocator>;
     };
 
-    template<typename Allocator>
-    struct StorageSelector<PolicyHash, Allocator>
+    template<typename Allocator, uint32_t LevelPoolSize>
+    struct StorageSelector<PolicyHash, Allocator, LevelPoolSize>
     {
-        using Type = HashStorage<Allocator>;
+        using Type = HashStorage<Allocator, LevelPoolSize>;
     };
 
     template<size_t BufferPoolSize>
@@ -100,17 +115,21 @@ namespace alpbook::nasdaq
             }
         }
 
-        std::array<std::byte, BufferPoolSize> buffer {};
+        alignas(2 * 1024 * 1024) std::array<std::byte, BufferPoolSize> buffer {};
     };
 
     export template<typename Policy,
                     Listener L,
                     uint32_t OrderPoolSize = DEFAULT_ORDER_POOL_SIZE,
-                    size_t BufferPoolSize = DEFAULT_BUFFER_POOL_SIZE>
+                    size_t BufferPoolSize = PolicyTraits<Policy>::DefaultBufferSize,
+                    uint32_t LevelPoolSize = DEFAULT_LEVEL_POOL_SIZE>
     class Book
     {
         using PmrAllocator = std::pmr::polymorphic_allocator<std::byte>;
-        using Storage = StorageSelector<Policy, PmrAllocator>::Type;
+        using Storage = StorageSelector<Policy, PmrAllocator, LevelPoolSize>::Type;
+
+        static_assert(BookStorage<Storage>,
+                      "Selected storage policy does not satisfy BookStorage.");
 
       public:
         Book(L& listener)
@@ -118,6 +137,7 @@ namespace alpbook::nasdaq
             , monotonicResource_(buffer_.buffer.data(), buffer_.buffer.size())
             , poolResource_(&monotonicResource_)
             , storage_(PmrAllocator(&poolResource_))
+            , orderPool_(OrderPoolSize, PmrAllocator(&poolResource_))
             , orderToDetails_(PmrAllocator(&poolResource_))
         {
             orderToDetails_.reserve(OrderPoolSize);
@@ -581,7 +601,7 @@ namespace alpbook::nasdaq
             uint32_t currentId = INVALID_ID;
             if constexpr (std::is_same_v<Policy, PolicyTree>)
             {
-                auto const& levels = (S == Side::Buy ? storage_.bidLevels_ : storage_.askLevels_);
+                auto const& levels = storage_.template getLevels<S>();
                 auto levelIt = levels.find(orderPrice);
 
                 if (levelIt == levels.end()) [[unlikely]]
@@ -635,13 +655,13 @@ namespace alpbook::nasdaq
         L* listener_ {};
 
         // Memory resources for allocation
-        alignas(std::max_align_t) TreeBuffer<BufferPoolSize> buffer_ {};
+        TreeBuffer<BufferPoolSize> buffer_ {};
         std::pmr::monotonic_buffer_resource monotonicResource_;
         std::pmr::unsynchronized_pool_resource poolResource_;
 
         Storage storage_;
 
-        internal::ObjectPool<Order> orderPool_ {OrderPoolSize};
+        internal::ObjectPool<Order, std::pmr::polymorphic_allocator<Order>> orderPool_;
         OrderMap orderToDetails_ {};
 
         // Cached versions of the best bid and ask

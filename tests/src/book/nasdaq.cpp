@@ -19,6 +19,8 @@ using alpbook::nasdaq::DecrementShares;
 using alpbook::nasdaq::ExecuteOrder;
 using alpbook::nasdaq::ReplaceOrder;
 
+using PolicyTypes = ::testing::Types<alpbook::nasdaq::PolicyTree, alpbook::nasdaq::PolicyHash>;
+
 struct MockListener
 {
     struct BidChange
@@ -144,705 +146,714 @@ namespace TestHelpers
     };
 }  // namespace TestHelpers
 
+template<typename Policy>
 class NasdaqBookTest : public ::testing::Test
 {
   protected:
     MockListener listener;
-    std::unique_ptr<alpbook::nasdaq::Book<MockListener>> book;
+    std::unique_ptr<alpbook::nasdaq::Book<Policy, MockListener>> book;
     TestHelpers::OrderIdGenerator orderGen;
 
     void SetUp() override
     {
-        book = std::make_unique<alpbook::nasdaq::Book<MockListener>>(listener);
+        book = std::make_unique<alpbook::nasdaq::Book<Policy, MockListener>>(listener);
     }
 
     void TearDown() override { book.reset(); }
 
-    void addBuy(uint64_t price, uint32_t shares) { book->add(orderGen.createBuy(price, shares)); }
+    void addBuy(uint64_t price, uint32_t shares)
+    {
+        this->book->add(this->orderGen.createBuy(price, shares));
+    }
 
-    void addSell(uint64_t price, uint32_t shares) { book->add(orderGen.createSell(price, shares)); }
+    void addSell(uint64_t price, uint32_t shares)
+    {
+        this->book->add(this->orderGen.createSell(price, shares));
+    }
 };
 
-TEST_F(NasdaqBookTest, EmptyBookInitialization)
+TYPED_TEST_SUITE(NasdaqBookTest, PolicyTypes);
+
+TYPED_TEST(NasdaqBookTest, EmptyBookInitialization)
 {
-    auto bestBid = book->getBestBid();
-    auto bestAsk = book->getBestAsk();
+    auto bestBid = this->book->getBestBid();
+    auto bestAsk = this->book->getBestAsk();
 
     TestHelpers::assertEmptyLevel(bestBid);
     TestHelpers::assertEmptyLevel(bestAsk);
-    EXPECT_EQ(listener.bidChangeCount(), 0);
-    EXPECT_EQ(listener.askChangeCount(), 0);
+    EXPECT_EQ(this->listener.bidChangeCount(), 0);
+    EXPECT_EQ(this->listener.askChangeCount(), 0);
 }
 
-TEST_F(NasdaqBookTest, AddSingleBuyOrder)
+TYPED_TEST(NasdaqBookTest, AddSingleBuyOrder)
 {
-    addBuy(100, 50);
+    this->addBuy(100, 50);
 
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 100, 50);
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 100, 50);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 100, 50);
 }
 
-TEST_F(NasdaqBookTest, AddSingleSellOrder)
+TYPED_TEST(NasdaqBookTest, AddSingleSellOrder)
 {
-    addSell(101, 60);
+    this->addSell(101, 60);
 
-    auto bestAsk = book->getBestAsk();
+    auto bestAsk = this->book->getBestAsk();
     TestHelpers::assertLevel(bestAsk, 101, 60);
 
-    EXPECT_EQ(listener.askChangeCount(), 1);
-    TestHelpers::assertAskChanged(listener, 0, 101, 60);
+    EXPECT_EQ(this->listener.askChangeCount(), 1);
+    TestHelpers::assertAskChanged(this->listener, 0, 101, 60);
 }
 
-TEST_F(NasdaqBookTest, AddMultipleOrdersAtSamePrice)
+TYPED_TEST(NasdaqBookTest, AddMultipleOrdersAtSamePrice)
 {
-    addBuy(100, 50);
-    listener.reset();
+    this->addBuy(100, 50);
+    this->listener.reset();
 
-    addBuy(100, 30);
+    this->addBuy(100, 30);
 
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 100, 80);  // 50 + 30
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 100, 80);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 100, 80);
 }
 
-TEST_F(NasdaqBookTest, AddOrdersAtMultiplePriceLevels)
+TYPED_TEST(NasdaqBookTest, AddOrdersAtMultiplePriceLevels)
 {
-    addBuy(100, 50);
-    addBuy(99, 40);
-    addBuy(101, 30);
+    this->addBuy(100, 50);
+    this->addBuy(99, 40);
+    this->addBuy(101, 30);
 
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 101, 30);  // Best bid is highest price
 
-    addSell(105, 20);
-    addSell(106, 25);
-    addSell(104, 15);
+    this->addSell(105, 20);
+    this->addSell(106, 25);
+    this->addSell(104, 15);
 
-    auto bestAsk = book->getBestAsk();
+    auto bestAsk = this->book->getBestAsk();
     TestHelpers::assertLevel(bestAsk, 104, 15);  // Best ask is lowest price
 }
 
-TEST_F(NasdaqBookTest, ExecuteFullOrder)
+TYPED_TEST(NasdaqBookTest, ExecuteFullOrder)
 {
-    addBuy(100, 50);
-    uint64_t orderId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t orderId = this->orderGen.lastId();
 
-    listener.reset();
-    auto result = book->execute(ExecuteOrder {orderId, 50});
+    this->listener.reset();
+    auto result = this->book->execute(ExecuteOrder {orderId, 50});
 
     ASSERT_TRUE(result.has_value());
 
     // Order should be removed from book
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertEmptyLevel(bestBid);
 
     // Should trigger trade and top bid change
-    EXPECT_EQ(listener.tradeCount(), 1);
-    TestHelpers::assertTrade(listener, 0, 100, 50, Side::Buy);
+    EXPECT_EQ(this->listener.tradeCount(), 1);
+    TestHelpers::assertTrade(this->listener, 0, 100, 50, Side::Buy);
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 0, 0);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 0, 0);
 }
 
-TEST_F(NasdaqBookTest, ExecutePartialOrder)
+TYPED_TEST(NasdaqBookTest, ExecutePartialOrder)
 {
-    addBuy(100, 50);
-    uint64_t orderId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t orderId = this->orderGen.lastId();
 
-    listener.reset();
-    auto result = book->execute(ExecuteOrder {orderId, 20});
+    this->listener.reset();
+    auto result = this->book->execute(ExecuteOrder {orderId, 20});
 
     ASSERT_TRUE(result.has_value());
 
     // Order should have 30 shares remaining
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 100, 30);
 
     // Should trigger trade and top bid change
-    EXPECT_EQ(listener.tradeCount(), 1);
-    TestHelpers::assertTrade(listener, 0, 100, 20, Side::Buy);
+    EXPECT_EQ(this->listener.tradeCount(), 1);
+    TestHelpers::assertTrade(this->listener, 0, 100, 20, Side::Buy);
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 100, 30);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 100, 30);
 }
 
-TEST_F(NasdaqBookTest, ExecuteInvalidOrderId)
+TYPED_TEST(NasdaqBookTest, ExecuteInvalidOrderId)
 {
-    addBuy(100, 50);
+    this->addBuy(100, 50);
 
-    auto result = book->execute(ExecuteOrder {99999, 10});
+    auto result = this->book->execute(ExecuteOrder {99999, 10});
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
-TEST_F(NasdaqBookTest, ExecuteUpdatesTopOfBook)
+TYPED_TEST(NasdaqBookTest, ExecuteUpdatesTopOfBook)
 {
-    addBuy(100, 50);
-    addBuy(99, 40);
+    this->addBuy(100, 50);
+    this->addBuy(99, 40);
 
-    uint64_t topOrderId = orderGen.lastId() - 1;  // First order at price 100
+    uint64_t topOrderId = this->orderGen.lastId() - 1;  // First order at price 100
 
-    listener.reset();
-    auto result = book->execute(ExecuteOrder {topOrderId, 50});
+    this->listener.reset();
+    auto result = this->book->execute(ExecuteOrder {topOrderId, 50});
 
     ASSERT_TRUE(result.has_value());
 
     // Best bid should now be at price 99
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 99, 40);
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 99, 40);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 99, 40);
 }
 
-TEST_F(NasdaqBookTest, CancelSingleOrder)
+TYPED_TEST(NasdaqBookTest, CancelSingleOrder)
 {
-    addBuy(100, 50);
-    uint64_t orderId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t orderId = this->orderGen.lastId();
 
-    listener.reset();
-    auto result = book->cancel(CancelOrder {orderId});
+    this->listener.reset();
+    auto result = this->book->cancel(CancelOrder {orderId});
 
     ASSERT_TRUE(result.has_value());
 
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertEmptyLevel(bestBid);
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 0, 0);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 0, 0);
 }
 
-TEST_F(NasdaqBookTest, CancelInvalidId)
+TYPED_TEST(NasdaqBookTest, CancelInvalidId)
 {
-    addBuy(100, 50);
+    this->addBuy(100, 50);
 
-    auto result = book->cancel(CancelOrder {99999});
+    auto result = this->book->cancel(CancelOrder {99999});
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
-TEST_F(NasdaqBookTest, CancelUpdatesTopOfBook)
+TYPED_TEST(NasdaqBookTest, CancelUpdatesTopOfBook)
 {
-    addBuy(100, 50);
-    uint64_t topOrderId = orderGen.lastId();
-    addBuy(99, 40);
+    this->addBuy(100, 50);
+    uint64_t topOrderId = this->orderGen.lastId();
+    this->addBuy(99, 40);
 
-    listener.reset();
-    auto result = book->cancel(CancelOrder {topOrderId});
+    this->listener.reset();
+    auto result = this->book->cancel(CancelOrder {topOrderId});
 
     ASSERT_TRUE(result.has_value());
 
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 99, 40);
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 99, 40);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 99, 40);
 }
 
-TEST_F(NasdaqBookTest, OnTopBidChangeWhenFirstBuyAdded)
+TYPED_TEST(NasdaqBookTest, OnTopBidChangeWhenFirstBuyAdded)
 {
-    addBuy(100, 50);
+    this->addBuy(100, 50);
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 100, 50);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 100, 50);
 }
 
-TEST_F(NasdaqBookTest, OnTopAskChangeWhenFirstSellAdded)
+TYPED_TEST(NasdaqBookTest, OnTopAskChangeWhenFirstSellAdded)
 {
-    addSell(101, 60);
+    this->addSell(101, 60);
 
-    EXPECT_EQ(listener.askChangeCount(), 1);
-    TestHelpers::assertAskChanged(listener, 0, 101, 60);
+    EXPECT_EQ(this->listener.askChangeCount(), 1);
+    TestHelpers::assertAskChanged(this->listener, 0, 101, 60);
 }
 
-TEST_F(NasdaqBookTest, OnTopBidChangeWhenBetterBidPriceAdded)
+TYPED_TEST(NasdaqBookTest, OnTopBidChangeWhenBetterBidPriceAdded)
 {
-    addBuy(100, 50);
-    listener.reset();
+    this->addBuy(100, 50);
+    this->listener.reset();
 
-    addBuy(101, 30);
+    this->addBuy(101, 30);
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 101, 30);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 101, 30);
 }
 
-TEST_F(NasdaqBookTest, OnTopBidChangeWhenSameBidPriceAdded)
+TYPED_TEST(NasdaqBookTest, OnTopBidChangeWhenSameBidPriceAdded)
 {
-    addBuy(100, 50);
-    listener.reset();
+    this->addBuy(100, 50);
+    this->listener.reset();
 
-    addBuy(100, 30);
+    this->addBuy(100, 30);
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 100, 80);  // Quantity updated
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 100, 80);  // Quantity updated
 }
 
-TEST_F(NasdaqBookTest, OnTopBidChangeWhenLastOrderAtBestBidCanceled)
+TYPED_TEST(NasdaqBookTest, OnTopBidChangeWhenLastOrderAtBestBidCanceled)
 {
-    addBuy(100, 50);
-    uint64_t orderId = orderGen.lastId();
-    addBuy(99, 40);
+    this->addBuy(100, 50);
+    uint64_t orderId = this->orderGen.lastId();
+    this->addBuy(99, 40);
 
-    listener.reset();
-    book->cancel(CancelOrder {orderId});
+    this->listener.reset();
+    this->book->cancel(CancelOrder {orderId});
 
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 99, 40);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 99, 40);
 }
 
-TEST_F(NasdaqBookTest, OnTradeTriggeredOnExecute)
+TYPED_TEST(NasdaqBookTest, OnTradeTriggeredOnExecute)
 {
-    addBuy(100, 50);
-    uint64_t orderId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t orderId = this->orderGen.lastId();
 
-    listener.reset();
-    book->execute(ExecuteOrder {orderId, 20});
+    this->listener.reset();
+    this->book->execute(ExecuteOrder {orderId, 20});
 
-    EXPECT_EQ(listener.tradeCount(), 1);
-    TestHelpers::assertTrade(listener, 0, 100, 20, Side::Buy);
+    EXPECT_EQ(this->listener.tradeCount(), 1);
+    TestHelpers::assertTrade(this->listener, 0, 100, 20, Side::Buy);
 }
 
-TEST_F(NasdaqBookTest, GetBestBidAskReturnsCorrectValues)
+TYPED_TEST(NasdaqBookTest, GetBestBidAskReturnsCorrectValues)
 {
-    addBuy(100, 50);
-    addSell(101, 60);
+    this->addBuy(100, 50);
+    this->addSell(101, 60);
 
-    auto bestBid = book->getBestBid();
-    auto bestAsk = book->getBestAsk();
+    auto bestBid = this->book->getBestBid();
+    auto bestAsk = this->book->getBestAsk();
 
     TestHelpers::assertLevel(bestBid, 100, 50);
     TestHelpers::assertLevel(bestAsk, 101, 60);
 }
 
-TEST_F(NasdaqBookTest, GetBestBidAskOnEmptyBook)
+TYPED_TEST(NasdaqBookTest, GetBestBidAskOnEmptyBook)
 {
-    auto bestBid = book->getBestBid();
-    auto bestAsk = book->getBestAsk();
+    auto bestBid = this->book->getBestBid();
+    auto bestAsk = this->book->getBestAsk();
 
     TestHelpers::assertEmptyLevel(bestBid);
     TestHelpers::assertEmptyLevel(bestAsk);
 }
 
-TEST_F(NasdaqBookTest, ReducePartialOrder)
+TYPED_TEST(NasdaqBookTest, ReducePartialOrder)
 {
-    addBuy(100, 50);
-    uint64_t orderId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t orderId = this->orderGen.lastId();
 
-    listener.reset();
-    auto result = book->reduce(DecrementShares {orderId, 20});
+    this->listener.reset();
+    auto result = this->book->reduce(DecrementShares {orderId, 20});
 
     ASSERT_TRUE(result.has_value());
 
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 100, 30);
 
     // Reduce should NOT trigger trade notification
-    EXPECT_EQ(listener.tradeCount(), 0);
+    EXPECT_EQ(this->listener.tradeCount(), 0);
 
     // But should update top of book
-    EXPECT_EQ(listener.bidChangeCount(), 1);
-    TestHelpers::assertBidChanged(listener, 0, 100, 30);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
+    TestHelpers::assertBidChanged(this->listener, 0, 100, 30);
 }
 
-TEST_F(NasdaqBookTest, ReduceFullOrderBehavesLikeCancel)
+TYPED_TEST(NasdaqBookTest, ReduceFullOrderBehavesLikeCancel)
 {
-    addBuy(100, 50);
-    uint64_t orderId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t orderId = this->orderGen.lastId();
 
-    listener.reset();
-    auto result = book->reduce(DecrementShares {orderId, 50});
+    this->listener.reset();
+    auto result = this->book->reduce(DecrementShares {orderId, 50});
 
     ASSERT_TRUE(result.has_value());
 
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertEmptyLevel(bestBid);
 
-    EXPECT_EQ(listener.tradeCount(), 0);
-    EXPECT_EQ(listener.bidChangeCount(), 1);
+    EXPECT_EQ(this->listener.tradeCount(), 0);
+    EXPECT_EQ(this->listener.bidChangeCount(), 1);
 }
 
-TEST_F(NasdaqBookTest, ReduceWithInvalidId)
+TYPED_TEST(NasdaqBookTest, ReduceWithInvalidId)
 {
-    addBuy(100, 50);
+    this->addBuy(100, 50);
 
-    auto result = book->reduce(DecrementShares {99999, 10});
+    auto result = this->book->reduce(DecrementShares {99999, 10});
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
-TEST_F(NasdaqBookTest, ReplaceAtSamePriceLosesTimePriority)
+TYPED_TEST(NasdaqBookTest, ReplaceAtSamePriceLosesTimePriority)
 {
-    addBuy(100, 50);
-    uint64_t firstId = orderGen.lastId();
-    addBuy(100, 30);
-    uint64_t secondId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t firstId = this->orderGen.lastId();
+    this->addBuy(100, 30);
+    uint64_t secondId = this->orderGen.lastId();
 
     // Replace first order - should move to end of queue
-    listener.reset();
-    uint64_t newId = orderGen.peekNextId();
-    auto result = book->replace(ReplaceOrder {2000, firstId, newId, 100, 40});
+    this->listener.reset();
+    uint64_t newId = this->orderGen.peekNextId();
+    auto result = this->book->replace(ReplaceOrder {2000, firstId, newId, 100, 40});
 
     ASSERT_TRUE(result.has_value());
 
     // Total quantity should be 30 + 40 = 70
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 100, 70);
 
     // Verify time priority: secondId should have 0 ahead, newId should have 30 ahead
-    auto volumeAhead = book->getBuyVolumeAheadByOrder(newId);
+    auto volumeAhead = this->book->getBuyVolumeAheadByOrder(newId);
     ASSERT_TRUE(volumeAhead.has_value());
     EXPECT_EQ(TestHelpers::toU64(volumeAhead.value()), 30u);
 }
 
-TEST_F(NasdaqBookTest, ReplaceAtDifferentPriceLevel)
+TYPED_TEST(NasdaqBookTest, ReplaceAtDifferentPriceLevel)
 {
-    addBuy(100, 50);
-    uint64_t orderId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t orderId = this->orderGen.lastId();
 
-    listener.reset();
-    uint64_t newId = orderGen.peekNextId();
-    auto result = book->replace(ReplaceOrder {2000, orderId, newId, 101, 40});
+    this->listener.reset();
+    uint64_t newId = this->orderGen.peekNextId();
+    auto result = this->book->replace(ReplaceOrder {2000, orderId, newId, 101, 40});
 
     ASSERT_TRUE(result.has_value());
 
     // Old price level should be gone
-    auto oldBid = book->getBestBid();
+    auto oldBid = this->book->getBestBid();
     TestHelpers::assertLevel(oldBid, 101, 40);
 
-    EXPECT_EQ(listener.bidChangeCount(), 2);  // Once for cancel, once for add
+    EXPECT_EQ(this->listener.bidChangeCount(), 2);  // Once for cancel, once for add
 }
 
-TEST_F(NasdaqBookTest, ReplaceWithInvalidId)
+TYPED_TEST(NasdaqBookTest, ReplaceWithInvalidId)
 {
-    addBuy(100, 50);
+    this->addBuy(100, 50);
 
-    auto result = book->replace(ReplaceOrder {2000, 99999, 5000, 101, 40});
+    auto result = this->book->replace(ReplaceOrder {2000, 99999, 5000, 101, 40});
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
-TEST_F(NasdaqBookTest, GetBuyVolumeAheadWithMultiplePriceLevels)
+TYPED_TEST(NasdaqBookTest, GetBuyVolumeAheadWithMultiplePriceLevels)
 {
-    addBuy(103, 50);
-    addBuy(102, 40);
-    addBuy(101, 30);
-    addBuy(100, 20);
+    this->addBuy(103, 50);
+    this->addBuy(102, 40);
+    this->addBuy(101, 30);
+    this->addBuy(100, 20);
 
-    auto volume = book->getBuyVolumeAhead(TestHelpers::makePrice(101));
+    auto volume = this->book->getBuyVolumeAhead(TestHelpers::makePrice(101));
     EXPECT_EQ(TestHelpers::toU64(volume), 90u);  // 50 + 40
 }
 
-TEST_F(NasdaqBookTest, GetSellVolumeAheadWithMultiplePriceLevels)
+TYPED_TEST(NasdaqBookTest, GetSellVolumeAheadWithMultiplePriceLevels)
 {
-    addSell(100, 20);
-    addSell(101, 30);
-    addSell(102, 40);
-    addSell(103, 50);
+    this->addSell(100, 20);
+    this->addSell(101, 30);
+    this->addSell(102, 40);
+    this->addSell(103, 50);
 
-    auto volume = book->getSellVolumeAhead(TestHelpers::makePrice(101));
+    auto volume = this->book->getSellVolumeAhead(TestHelpers::makePrice(101));
     EXPECT_EQ(TestHelpers::toU64(volume), 20u);  // Only 100 is better
 }
 
-TEST_F(NasdaqBookTest, GetBuyVolumeAheadByOrderVerifiesQueuePosition)
+TYPED_TEST(NasdaqBookTest, GetBuyVolumeAheadByOrderVerifiesQueuePosition)
 {
-    addBuy(100, 50);
-    addBuy(100, 30);
-    uint64_t secondId = orderGen.lastId();
-    addBuy(100, 20);
-    uint64_t thirdId = orderGen.lastId();
+    this->addBuy(100, 50);
+    this->addBuy(100, 30);
+    uint64_t secondId = this->orderGen.lastId();
+    this->addBuy(100, 20);
+    uint64_t thirdId = this->orderGen.lastId();
 
     // Second order should have 50 ahead
-    auto volumeAhead2 = book->getBuyVolumeAheadByOrder(secondId);
+    auto volumeAhead2 = this->book->getBuyVolumeAheadByOrder(secondId);
     ASSERT_TRUE(volumeAhead2.has_value());
     EXPECT_EQ(TestHelpers::toU64(volumeAhead2.value()), 50u);
 
     // Third order should have 50 + 30 = 80 ahead
-    auto volumeAhead3 = book->getBuyVolumeAheadByOrder(thirdId);
+    auto volumeAhead3 = this->book->getBuyVolumeAheadByOrder(thirdId);
     ASSERT_TRUE(volumeAhead3.has_value());
     EXPECT_EQ(TestHelpers::toU64(volumeAhead3.value()), 80u);
 }
 
-TEST_F(NasdaqBookTest, GetSellVolumeAheadByOrderVerifiesQueuePosition)
+TYPED_TEST(NasdaqBookTest, GetSellVolumeAheadByOrderVerifiesQueuePosition)
 {
-    addSell(100, 50);
-    addSell(100, 30);
-    uint64_t secondId = orderGen.lastId();
+    this->addSell(100, 50);
+    this->addSell(100, 30);
+    uint64_t secondId = this->orderGen.lastId();
 
-    auto volumeAhead = book->getSellVolumeAheadByOrder(secondId);
+    auto volumeAhead = this->book->getSellVolumeAheadByOrder(secondId);
     ASSERT_TRUE(volumeAhead.has_value());
     EXPECT_EQ(TestHelpers::toU64(volumeAhead.value()), 50u);
 }
 
-TEST_F(NasdaqBookTest, VolumeQueryWithInvalidOrderId)
+TYPED_TEST(NasdaqBookTest, VolumeQueryWithInvalidOrderId)
 {
-    addBuy(100, 50);
+    this->addBuy(100, 50);
 
-    auto result = book->getBuyVolumeAheadByOrder(99999);
+    auto result = this->book->getBuyVolumeAheadByOrder(99999);
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), BookError::MissingId);
 }
 
-TEST_F(NasdaqBookTest, GetBidLevelAtVariousDepths)
+TYPED_TEST(NasdaqBookTest, GetBidLevelAtVariousDepths)
 {
-    addBuy(103, 50);
-    addBuy(102, 40);
-    addBuy(101, 30);
+    this->addBuy(103, 50);
+    this->addBuy(102, 40);
+    this->addBuy(101, 30);
 
-    auto level0 = book->getBidLevel(0);
+    auto level0 = this->book->getBidLevel(0);
     TestHelpers::assertLevel(level0, 103, 50);
 
-    auto level1 = book->getBidLevel(1);
+    auto level1 = this->book->getBidLevel(1);
     TestHelpers::assertLevel(level1, 102, 40);
 
-    auto level2 = book->getBidLevel(2);
+    auto level2 = this->book->getBidLevel(2);
     TestHelpers::assertLevel(level2, 101, 30);
 }
 
-TEST_F(NasdaqBookTest, GetAskLevelAtVariousDepths)
+TYPED_TEST(NasdaqBookTest, GetAskLevelAtVariousDepths)
 {
-    addSell(100, 20);
-    addSell(101, 30);
-    addSell(102, 40);
+    this->addSell(100, 20);
+    this->addSell(101, 30);
+    this->addSell(102, 40);
 
-    auto level0 = book->getAskLevel(0);
+    auto level0 = this->book->getAskLevel(0);
     TestHelpers::assertLevel(level0, 100, 20);
 
-    auto level1 = book->getAskLevel(1);
+    auto level1 = this->book->getAskLevel(1);
     TestHelpers::assertLevel(level1, 101, 30);
 
-    auto level2 = book->getAskLevel(2);
+    auto level2 = this->book->getAskLevel(2);
     TestHelpers::assertLevel(level2, 102, 40);
 }
 
-TEST_F(NasdaqBookTest, GetLevelBeyondAvailableDepth)
+TYPED_TEST(NasdaqBookTest, GetLevelBeyondAvailableDepth)
 {
-    addBuy(100, 50);
-    addBuy(99, 40);
+    this->addBuy(100, 50);
+    this->addBuy(99, 40);
 
-    auto level = book->getBidLevel(5);
+    auto level = this->book->getBidLevel(5);
     TestHelpers::assertEmptyLevel(level);
 }
 
-TEST_F(NasdaqBookTest, CancelHeadOfQueue)
+TYPED_TEST(NasdaqBookTest, CancelHeadOfQueue)
 {
-    addBuy(100, 50);
-    uint64_t firstId = orderGen.lastId();
-    addBuy(100, 30);
-    addBuy(100, 20);
+    this->addBuy(100, 50);
+    uint64_t firstId = this->orderGen.lastId();
+    this->addBuy(100, 30);
+    this->addBuy(100, 20);
 
-    listener.reset();
-    auto result = book->cancel(CancelOrder {firstId});
+    this->listener.reset();
+    auto result = this->book->cancel(CancelOrder {firstId});
 
     ASSERT_TRUE(result.has_value());
 
     // Total should be 30 + 20 = 50
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 100, 50);
 }
 
-TEST_F(NasdaqBookTest, CancelTailOfQueue)
+TYPED_TEST(NasdaqBookTest, CancelTailOfQueue)
 {
-    addBuy(100, 50);
-    addBuy(100, 30);
-    addBuy(100, 20);
-    uint64_t lastId = orderGen.lastId();
+    this->addBuy(100, 50);
+    this->addBuy(100, 30);
+    this->addBuy(100, 20);
+    uint64_t lastId = this->orderGen.lastId();
 
-    listener.reset();
-    auto result = book->cancel(CancelOrder {lastId});
+    this->listener.reset();
+    auto result = this->book->cancel(CancelOrder {lastId});
 
     ASSERT_TRUE(result.has_value());
 
     // Total should be 50 + 30 = 80
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 100, 80);
 }
 
-TEST_F(NasdaqBookTest, CancelMiddleOfQueue)
+TYPED_TEST(NasdaqBookTest, CancelMiddleOfQueue)
 {
-    addBuy(100, 50);
-    addBuy(100, 30);
-    uint64_t middleId = orderGen.lastId();
-    addBuy(100, 20);
+    this->addBuy(100, 50);
+    this->addBuy(100, 30);
+    uint64_t middleId = this->orderGen.lastId();
+    this->addBuy(100, 20);
 
-    listener.reset();
-    auto result = book->cancel(CancelOrder {middleId});
+    this->listener.reset();
+    auto result = this->book->cancel(CancelOrder {middleId});
 
     ASSERT_TRUE(result.has_value());
 
     // Total should be 50 + 20 = 70
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 100, 70);
 }
 
-TEST_F(NasdaqBookTest, CancelLastOrderAtPriceLevel)
+TYPED_TEST(NasdaqBookTest, CancelLastOrderAtPriceLevel)
 {
-    addBuy(100, 50);
-    uint64_t orderId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t orderId = this->orderGen.lastId();
 
-    listener.reset();
-    auto result = book->cancel(CancelOrder {orderId});
+    this->listener.reset();
+    auto result = this->book->cancel(CancelOrder {orderId});
 
     ASSERT_TRUE(result.has_value());
 
     // Price level should be removed
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertEmptyLevel(bestBid);
 }
 
-TEST_F(NasdaqBookTest, EmptyBookQueries)
+TYPED_TEST(NasdaqBookTest, EmptyBookQueries)
 {
-    auto volume = book->getBuyVolumeAhead(TestHelpers::makePrice(100));
+    auto volume = this->book->getBuyVolumeAhead(TestHelpers::makePrice(100));
     EXPECT_EQ(TestHelpers::toU64(volume), 0u);
 
-    auto level = book->getBidLevel(0);
+    auto level = this->book->getBidLevel(0);
     TestHelpers::assertEmptyLevel(level);
 }
 
-TEST_F(NasdaqBookTest, VolumeAheadWithNoOrders)
+TYPED_TEST(NasdaqBookTest, VolumeAheadWithNoOrders)
 {
-    auto volume = book->getBuyVolumeAhead(TestHelpers::makePrice(100));
+    auto volume = this->book->getBuyVolumeAhead(TestHelpers::makePrice(100));
     EXPECT_EQ(TestHelpers::toU64(volume), 0u);
 
-    volume = book->getSellVolumeAhead(TestHelpers::makePrice(100));
+    volume = this->book->getSellVolumeAhead(TestHelpers::makePrice(100));
     EXPECT_EQ(TestHelpers::toU64(volume), 0u);
 }
 
-TEST_F(NasdaqBookTest, TimePriorityFIFO)
+TYPED_TEST(NasdaqBookTest, TimePriorityFIFO)
 {
-    addBuy(100, 50);
-    uint64_t firstId = orderGen.lastId();
-    addBuy(100, 30);
-    uint64_t secondId = orderGen.lastId();
-    addBuy(100, 20);
-    uint64_t thirdId = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t firstId = this->orderGen.lastId();
+    this->addBuy(100, 30);
+    uint64_t secondId = this->orderGen.lastId();
+    this->addBuy(100, 20);
+    uint64_t thirdId = this->orderGen.lastId();
 
     // Verify FIFO ordering
-    auto volume1 = book->getBuyVolumeAheadByOrder(firstId);
+    auto volume1 = this->book->getBuyVolumeAheadByOrder(firstId);
     ASSERT_TRUE(volume1.has_value());
     EXPECT_EQ(TestHelpers::toU64(volume1.value()), 0u);
 
-    auto volume2 = book->getBuyVolumeAheadByOrder(secondId);
+    auto volume2 = this->book->getBuyVolumeAheadByOrder(secondId);
     ASSERT_TRUE(volume2.has_value());
     EXPECT_EQ(TestHelpers::toU64(volume2.value()), 50u);
 
-    auto volume3 = book->getBuyVolumeAheadByOrder(thirdId);
+    auto volume3 = this->book->getBuyVolumeAheadByOrder(thirdId);
     ASSERT_TRUE(volume3.has_value());
     EXPECT_EQ(TestHelpers::toU64(volume3.value()), 80u);
 }
 
-TEST_F(NasdaqBookTest, PricePriorityBuyDescendingSellAscending)
+TYPED_TEST(NasdaqBookTest, PricePriorityBuyDescendingSellAscending)
 {
     // Add buys at different prices
-    addBuy(100, 50);
-    addBuy(102, 40);
-    addBuy(101, 30);
+    this->addBuy(100, 50);
+    this->addBuy(102, 40);
+    this->addBuy(101, 30);
 
     // Best bid should be highest price
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 102, 40);
 
     // Add sells at different prices
-    addSell(105, 20);
-    addSell(103, 30);
-    addSell(104, 25);
+    this->addSell(105, 20);
+    this->addSell(103, 30);
+    this->addSell(104, 25);
 
     // Best ask should be lowest price
-    auto bestAsk = book->getBestAsk();
+    auto bestAsk = this->book->getBestAsk();
     TestHelpers::assertLevel(bestAsk, 103, 30);
 }
 
-TEST_F(NasdaqBookTest, MultiplePriceLevelsOnBothSides)
+TYPED_TEST(NasdaqBookTest, MultiplePriceLevelsOnBothSides)
 {
     // Build a realistic book
-    addBuy(100, 50);
-    addBuy(99, 40);
-    addBuy(98, 30);
+    this->addBuy(100, 50);
+    this->addBuy(99, 40);
+    this->addBuy(98, 30);
 
-    addSell(101, 60);
-    addSell(102, 70);
-    addSell(103, 80);
+    this->addSell(101, 60);
+    this->addSell(102, 70);
+    this->addSell(103, 80);
 
-    auto bestBid = book->getBestBid();
-    auto bestAsk = book->getBestAsk();
+    auto bestBid = this->book->getBestBid();
+    auto bestAsk = this->book->getBestAsk();
 
     TestHelpers::assertLevel(bestBid, 100, 50);
     TestHelpers::assertLevel(bestAsk, 101, 60);
 
     // Verify depth queries
-    auto bid1 = book->getBidLevel(1);
+    auto bid1 = this->book->getBidLevel(1);
     TestHelpers::assertLevel(bid1, 99, 40);
 
-    auto ask1 = book->getAskLevel(1);
+    auto ask1 = this->book->getAskLevel(1);
     TestHelpers::assertLevel(ask1, 102, 70);
 }
 
-TEST_F(NasdaqBookTest, InterleavedOperations)
+TYPED_TEST(NasdaqBookTest, InterleavedOperations)
 {
-    addBuy(100, 50);
-    uint64_t id1 = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t id1 = this->orderGen.lastId();
 
-    addSell(101, 60);
+    this->addSell(101, 60);
 
-    addBuy(99, 40);
-    uint64_t id2 = orderGen.lastId();
+    this->addBuy(99, 40);
+    uint64_t id2 = this->orderGen.lastId();
 
     // Execute partial
-    book->execute(ExecuteOrder {id1, 20});
+    this->book->execute(ExecuteOrder {id1, 20});
 
     // Cancel
-    book->cancel(CancelOrder {id2});
+    this->book->cancel(CancelOrder {id2});
 
     // Add more
-    addBuy(101, 30);
+    this->addBuy(101, 30);
 
     // Replace
-    uint64_t newId = orderGen.peekNextId();
-    book->replace(ReplaceOrder {3000, id1, newId, 100, 25});
+    uint64_t newId = this->orderGen.peekNextId();
+    this->book->replace(ReplaceOrder {3000, id1, newId, 100, 25});
 
     // Verify final state
-    auto bestBid = book->getBestBid();
+    auto bestBid = this->book->getBestBid();
     TestHelpers::assertLevel(bestBid, 101, 30);
 
-    auto bestAsk = book->getBestAsk();
+    auto bestAsk = this->book->getBestAsk();
     TestHelpers::assertLevel(bestAsk, 101, 60);
 }
 
-TEST_F(NasdaqBookTest, BuildAndTearDownScenario)
+TYPED_TEST(NasdaqBookTest, BuildAndTearDownScenario)
 {
     // Build up book
-    addBuy(100, 50);
-    uint64_t b1 = orderGen.lastId();
-    addBuy(99, 40);
-    uint64_t b2 = orderGen.lastId();
-    addSell(101, 60);
-    uint64_t s1 = orderGen.lastId();
-    addSell(102, 70);
-    uint64_t s2 = orderGen.lastId();
+    this->addBuy(100, 50);
+    uint64_t b1 = this->orderGen.lastId();
+    this->addBuy(99, 40);
+    uint64_t b2 = this->orderGen.lastId();
+    this->addSell(101, 60);
+    uint64_t s1 = this->orderGen.lastId();
+    this->addSell(102, 70);
+    uint64_t s2 = this->orderGen.lastId();
 
     // Verify state
-    TestHelpers::assertLevel(book->getBestBid(), 100, 50);
-    TestHelpers::assertLevel(book->getBestAsk(), 101, 60);
+    TestHelpers::assertLevel(this->book->getBestBid(), 100, 50);
+    TestHelpers::assertLevel(this->book->getBestAsk(), 101, 60);
 
     // Tear down
-    book->cancel(CancelOrder {b1});
-    TestHelpers::assertLevel(book->getBestBid(), 99, 40);
+    this->book->cancel(CancelOrder {b1});
+    TestHelpers::assertLevel(this->book->getBestBid(), 99, 40);
 
-    book->cancel(CancelOrder {s1});
-    TestHelpers::assertLevel(book->getBestAsk(), 102, 70);
+    this->book->cancel(CancelOrder {s1});
+    TestHelpers::assertLevel(this->book->getBestAsk(), 102, 70);
 
-    book->cancel(CancelOrder {b2});
-    TestHelpers::assertEmptyLevel(book->getBestBid());
+    this->book->cancel(CancelOrder {b2});
+    TestHelpers::assertEmptyLevel(this->book->getBestBid());
 
-    book->cancel(CancelOrder {s2});
-    TestHelpers::assertEmptyLevel(book->getBestAsk());
+    this->book->cancel(CancelOrder {s2});
+    TestHelpers::assertEmptyLevel(this->book->getBestAsk());
 }

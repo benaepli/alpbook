@@ -21,7 +21,8 @@ namespace alpbook_latency
         BenchmarkStrategyFactory strategyFactory_;
 
       public:
-        using SinkType = alpbook::nasdaq::Sink<BenchmarkStrategy, BenchmarkStrategyFactory, true>;
+        using SinkType = alpbook::nasdaq::
+            Sink<alpbook::nasdaq::PolicyHash, BenchmarkStrategy, BenchmarkStrategyFactory, true>;
 
         explicit BenchmarkSinkFactory(BenchmarkStrategyFactory sf)
             : strategyFactory_(sf)

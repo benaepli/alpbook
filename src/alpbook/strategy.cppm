@@ -12,7 +12,7 @@ namespace alpbook::strategy
 {
     export template<typename T, typename B>
     concept Strategy =
-        Book<B> && requires(T strategy, B* bookPtr, uint64_t price, uint32_t qty, Side side) {
+        requires(T strategy, B* bookPtr, uint64_t price, uint32_t qty, Side side) {
             { strategy.setBook(bookPtr) } -> std::same_as<void>;
             { strategy.setAsset(uint16_t {}) } -> std::same_as<void>;
 

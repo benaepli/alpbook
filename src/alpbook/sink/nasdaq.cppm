@@ -18,18 +18,19 @@ export module alpbook.sink.nasdaq;
 
 namespace alpbook::nasdaq
 {
-    enum class ContextState : uint8_t
+    export enum class ContextState : uint8_t
     {
         Normal,
         Failed,
         Recovering,
     };
 
-    export template<typename S, typename SF, bool Benchmark = false>
-        requires strategy::Strategy<S, Book<S>> && strategy::StrategyFactory<SF, S, Book<S>>
+    export template<typename Policy, typename S, typename SF, bool Benchmark = false>
+        requires strategy::Strategy<S, Book<Policy, S>>
+        && strategy::StrategyFactory<SF, S, Book<Policy, S>>
     struct Context
     {
-        using BookType = Book<S>;
+        using BookType = Book<Policy, S>;
 
         S strategy;
         BookType book;
@@ -113,6 +114,7 @@ namespace alpbook::nasdaq
                     if (state != ContextState::Recovering) [[unlikely]]
                     {
                         tripCircuitBreaker(BookError::MissingId);  // TODO: improve handling
+                        return false;
                     }
                     return true;
                 }
@@ -126,6 +128,7 @@ namespace alpbook::nasdaq
                     if (state != ContextState::Recovering)
                     {
                         tripCircuitBreaker(BookError::MissingId);  // TODO: improve handling
+                        return false;
                     }
                     endRecovery();
                     return true;
@@ -165,11 +168,12 @@ namespace alpbook::nasdaq
         }
     };
 
-    export template<typename S, typename SF, bool B = false>
-        requires strategy::Strategy<S, Book<S>> && strategy::StrategyFactory<SF, S, Book<S>>
+    export template<typename Policy, typename S, typename SF, bool B = false>
+        requires strategy::Strategy<S, Book<Policy, S>>
+        && strategy::StrategyFactory<SF, S, Book<Policy, S>>
     class Sink
     {
-        using Ctx = Context<S, SF, B>;
+        using Ctx = Context<Policy, S, SF, B>;
 
       public:
         template<typename Mapper>

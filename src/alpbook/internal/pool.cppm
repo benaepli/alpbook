@@ -15,21 +15,45 @@ export namespace alpbook::internal
     /// but the returned identifiers are. Objects are constructed with
     /// provided arguments using perfect forwarding.
     /// Objects must be trivially relocatable and trivially destructible.
-    template<typename T>
+    template<typename T, typename Allocator = std::allocator<T>>
         requires std::is_trivially_destructible_v<T>
     class ObjectPool
     {
       public:
-        ObjectPool() noexcept
-            : firstFree_(0)
+        using allocator_type = Allocator;
+        using value_type = T;
+
+        ObjectPool() noexcept(std::is_nothrow_default_constructible_v<Allocator>)
+            : alloc_()
+            , slots_(SlotAllocator(alloc_))
+            , firstFree_(0)
+        {
+        }
+
+        explicit ObjectPool(Allocator const& alloc) noexcept
+            : alloc_(alloc)
+            , slots_(SlotAllocator(alloc_))
+            , firstFree_(0)
         {
         }
 
         explicit ObjectPool(uint32_t reserved)
-            : firstFree_(0)
-            , slots_(reserved)
+            : alloc_()
+            , slots_(reserved, SlotAllocator(alloc_))
+            , firstFree_(0)
         {
-            for (auto i = 0; i < reserved; i++)
+            for (uint32_t i = 0; i < reserved; i++)
+            {
+                slots_[i].nextFree = i + 1;
+            }
+        }
+
+        ObjectPool(uint32_t reserved, Allocator const& alloc)
+            : alloc_(alloc)
+            , slots_(reserved, SlotAllocator(alloc_))
+            , firstFree_(0)
+        {
+            for (uint32_t i = 0; i < reserved; i++)
             {
                 slots_[i].nextFree = i + 1;
             }
@@ -39,6 +63,8 @@ export namespace alpbook::internal
         ObjectPool& operator=(ObjectPool const&) = delete;
         ObjectPool(ObjectPool&&) = delete;
         ObjectPool& operator=(ObjectPool&&) = delete;
+
+        Allocator getAllocator() const noexcept { return alloc_; }
 
         template<typename... Args>
         uint32_t allocate(Args&&... args)
@@ -99,7 +125,10 @@ export namespace alpbook::internal
             }
         };
 
-        std::vector<Slot> slots_;
+        using SlotAllocator = std::allocator_traits<Allocator>::template rebind_alloc<Slot>;
+
+        [[no_unique_address]] Allocator alloc_;
+        std::vector<Slot, SlotAllocator> slots_;
         uint32_t firstFree_;
     };
 }  // namespace alpbook::internal
