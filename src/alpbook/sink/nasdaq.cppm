@@ -127,6 +127,7 @@ namespace alpbook::nasdaq
                     {
                         tripCircuitBreaker(BookError::MissingId);  // TODO: improve handling
                     }
+                    endRecovery();
                     return true;
                 }
                 default:

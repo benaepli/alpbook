@@ -88,7 +88,7 @@ target_sources(alpbook
         src/alpbook/sink/nasdaq.cppm
         src/alpbook/strategy.cppm
 )
-target_link_libraries(alpbook PRIVATE eve::eve absl::flat_hash_map absl::numeric bpptree::bpptree hwloc readerwriterqueue zlibstatic)
+target_link_libraries(alpbook PRIVATE eve::eve absl::btree absl::flat_hash_map absl::numeric bpptree::bpptree hwloc readerwriterqueue zlibstatic)
 target_compile_features(alpbook PUBLIC cxx_std_23)
 
 if (ALPBOOK_BUILD_TESTS)

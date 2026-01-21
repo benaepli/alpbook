@@ -69,6 +69,22 @@ namespace alpbook::nasdaq
     {
     };
 
+    /// Maps storage policy to storage type.
+    template<typename Policy, typename Allocator>
+    struct StorageSelector;
+
+    template<typename Allocator>
+    struct StorageSelector<PolicyTree, Allocator>
+    {
+        using Type = TreeStorage<Allocator>;
+    };
+
+    template<typename Allocator>
+    struct StorageSelector<PolicyHash, Allocator>
+    {
+        using Type = HashStorage<Allocator>;
+    };
+
     template<size_t BufferPoolSize>
     struct TreeBuffer
     {
@@ -87,20 +103,21 @@ namespace alpbook::nasdaq
         std::array<std::byte, BufferPoolSize> buffer {};
     };
 
-    export template<Listener L,
+    export template<typename Policy,
+                    Listener L,
                     uint32_t OrderPoolSize = DEFAULT_ORDER_POOL_SIZE,
                     size_t BufferPoolSize = DEFAULT_BUFFER_POOL_SIZE>
     class Book
     {
         using PmrAllocator = std::pmr::polymorphic_allocator<std::byte>;
+        using Storage = StorageSelector<Policy, PmrAllocator>::Type;
 
       public:
         Book(L& listener)
             : listener_(&listener)
             , monotonicResource_(buffer_.buffer.data(), buffer_.buffer.size())
             , poolResource_(&monotonicResource_)
-            , bidLevels_(PmrAllocator(&poolResource_))
-            , askLevels_(PmrAllocator(&poolResource_))
+            , storage_(PmrAllocator(&poolResource_))
             , orderToDetails_(PmrAllocator(&poolResource_))
         {
             orderToDetails_.reserve(OrderPoolSize);
@@ -122,8 +139,7 @@ namespace alpbook::nasdaq
 
         void reset() noexcept
         {
-            bidLevels_.clear();
-            askLevels_.clear();
+            storage_.reset();
             orderToDetails_.clear();
             orderPool_.reset();
             bestBid_ = {};
@@ -133,48 +149,44 @@ namespace alpbook::nasdaq
         [[nodiscard]] Level getBestBid() const noexcept { return bestBid_; }
         [[nodiscard]] Level getBestAsk() const noexcept { return bestAsk_; }
 
-        /// Returns the bid level at the given depth. The time complexity is O(depth), so clients
-        /// should use this carefully.
+        /// Returns the bid level at the given depth.
         [[nodiscard]] Level getBidLevel(uint32_t depth) const noexcept
         {
-            return getLevelAtDepth(bidLevels_, depth);
+            return storage_.template getLevelAtDepth<Side::Buy>(depth);
         }
 
-        /// Returns the ask level at the given depth. The time complexity is O(depth), so clients
-        /// should use this carefully.
+        /// Returns the ask level at the given depth.
         [[nodiscard]] Level getAskLevel(uint32_t depth) const noexcept
         {
-            return getLevelAtDepth(askLevels_, depth);
+            return storage_.template getLevelAtDepth<Side::Sell>(depth);
         }
 
         /// Returns the total buy volume strictly better than the given price.
         [[nodiscard]] quantity_t getBuyVolumeAhead(price_t targetPrice) const noexcept
         {
-            auto it = bidLevels_.lower_bound(static_cast<uint64_t>(targetPrice));
-            return quantity_t(bidLevels_.sum_exclusive(it));
+            return quantity_t(
+                storage_.template getVolumeAhead<Side::Buy>(static_cast<uint64_t>(targetPrice)));
         }
 
         /// Returns the total sell volume strictly better than the given price.
         [[nodiscard]] quantity_t getSellVolumeAhead(price_t targetPrice) const noexcept
         {
-            auto it = askLevels_.lower_bound(static_cast<uint64_t>(targetPrice));
-            return quantity_t(askLevels_.sum_exclusive(it));
+            return quantity_t(
+                storage_.template getVolumeAhead<Side::Sell>(static_cast<uint64_t>(targetPrice)));
         }
 
-        /// Returns the total volume ahead of a specific order. Time complexity is O(log N + M)
-        /// where N is the number of price levels and M is the order's position in its queue.
+        /// Returns the total volume ahead of a specific order.
         [[nodiscard]] std::expected<quantity_t, BookError> getBuyVolumeAheadByOrder(
             uint64_t orderID) const noexcept
         {
-            return getVolumeAheadByOrderImpl(bidLevels_, orderID);
+            return getVolumeAheadByOrderImpl<Side::Buy>(orderID);
         }
 
-        /// Returns the total volume ahead of a specific order. Time complexity is O(log N + M)
-        /// where N is the number of price levels and M is the order's position in its queue.
+        /// Returns the total volume ahead of a specific order.
         [[nodiscard]] std::expected<quantity_t, BookError> getSellVolumeAheadByOrder(
             uint64_t orderID) const noexcept
         {
-            return getVolumeAheadByOrderImpl(askLevels_, orderID);
+            return getVolumeAheadByOrderImpl<Side::Sell>(orderID);
         }
 
         /// Adds an order. Assumes that this function is called in the correct order by ID.
@@ -225,11 +237,11 @@ namespace alpbook::nasdaq
 
             if (o.side == Side::Buy)
             {
-                cancelImpl<Side::Buy>(id, price, o, TagChange {});
+                cancelImpl<Side::Buy>(id, price, o, it, TagChange {});
             }
             else
             {
-                cancelImpl<Side::Sell>(id, price, o, TagChange {});
+                cancelImpl<Side::Sell>(id, price, o, it, TagChange {});
             }
             return {};
         }
@@ -247,31 +259,18 @@ namespace alpbook::nasdaq
             Order o = std::move(orderPool_[id]);
             if (o.side == Side::Buy)
             {
-                cancelImpl<Side::Buy>(id, price, o, TagChange {});
+                cancelImpl<Side::Buy>(id, price, o, it, TagChange {});
                 addImpl<Side::Buy>(order.timestamp, order.newId, order.price, order.shares);
             }
             else
             {
-                cancelImpl<Side::Sell>(id, price, o, TagChange {});
+                cancelImpl<Side::Sell>(id, price, o, it, TagChange {});
                 addImpl<Side::Sell>(order.timestamp, order.newId, order.price, order.shares);
             }
             return {};
         }
 
       private:
-        template<Side S>
-        auto& getLevels()
-        {
-            if constexpr (S == Side::Buy)
-            {
-                return bidLevels_;
-            }
-            else
-            {
-                return askLevels_;
-            }
-        }
-
         template<Side S>
         void updateBestAfterAdd(uint64_t price, uint32_t shares)
         {
@@ -310,32 +309,30 @@ namespace alpbook::nasdaq
                                     uint64_t price,
                                     uint32_t shares)
         {
-            auto& levels = getLevels<S>();
-
             auto newId = orderPool_.allocate(timestamp, orderId, shares, INVALID_ID, INVALID_ID, S);
 
-            if (levels.contains(price))
+            if (storage_.template hasLevel<S>(price))
             {
-                levels.update_key(price,
-                                  [&](PriceLevel const& level)
-                                  {
-                                      PriceLevel updated = level;
-                                      updated.totalShares += shares;
+                storage_.template updateLevel<S>(price,
+                                                 [&](PriceLevel const& level)
+                                                 {
+                                                     PriceLevel updated = level;
+                                                     updated.totalShares += shares;
 
-                                      // Link new order to end of queue
-                                      orderPool_[newId].prev = level.tail;
-                                      if (level.tail != INVALID_ID)
-                                      {
-                                          orderPool_[level.tail].next = newId;
-                                      }
-                                      updated.tail = newId;
-                                      return updated;
-                                  });
+                                                     // Link new order to end of queue
+                                                     orderPool_[newId].prev = level.tail;
+                                                     if (level.tail != INVALID_ID)
+                                                     {
+                                                         orderPool_[level.tail].next = newId;
+                                                     }
+                                                     updated.tail = newId;
+                                                     return updated;
+                                                 });
             }
             else
             {
                 PriceLevel newLevel {.head = newId, .tail = newId, .totalShares = shares};
-                levels.insert_v(price, newLevel);
+                storage_.template insertNewLevel<S>(price, newLevel);
             }
 
             updateBestAfterAdd<S>(price, shares);
@@ -345,65 +342,65 @@ namespace alpbook::nasdaq
         template<Side S>
         void addUnorderedImpl(uint64_t timestamp, uint64_t orderId, uint64_t price, uint32_t shares)
         {
-            auto& levels = getLevels<S>();
             auto newPoolId =
                 orderPool_.allocate(timestamp, orderId, shares, INVALID_ID, INVALID_ID, S);
 
-            if (!levels.contains(price))
+            if (!storage_.template hasLevel<S>(price))
             {
                 PriceLevel newLevel {.head = newPoolId, .tail = newPoolId, .totalShares = shares};
-                levels.insert_v(price, newLevel);
+                storage_.template insertNewLevel<S>(price, newLevel);
             }
             else
             {
-                levels.update_key(price,
-                                  [&](PriceLevel const& level)
-                                  {
-                                      PriceLevel updated = level;
-                                      updated.totalShares += shares;
+                storage_.template updateLevel<S>(
+                    price,
+                    [&](PriceLevel const& level)
+                    {
+                        PriceLevel updated = level;
+                        updated.totalShares += shares;
 
-                                      // Search from the back for insertion point
-                                      uint32_t current = level.tail;
-                                      uint32_t insertAfter = INVALID_ID;
+                        // Search from the back for insertion point
+                        uint32_t current = level.tail;
+                        uint32_t insertAfter = INVALID_ID;
 
-                                      while (current != INVALID_ID)
-                                      {
-                                          if (orderPool_[current].id < orderId)
-                                          {
-                                              insertAfter = current;
-                                              break;
-                                          }
-                                          current = orderPool_[current].prev;
-                                      }
+                        while (current != INVALID_ID)
+                        {
+                            if (orderPool_[current].id < orderId)
+                            {
+                                insertAfter = current;
+                                break;
+                            }
+                            current = orderPool_[current].prev;
+                        }
 
-                                      if (insertAfter == INVALID_ID)
-                                      {
-                                          // New order is the new HEAD (smallest ID)
-                                          orderPool_[newPoolId].next = updated.head;
-                                          if (updated.head != INVALID_ID)
-                                          {
-                                              orderPool_[updated.head].prev = newPoolId;
-                                          }
-                                          updated.head = newPoolId;
-                                      }
-                                      else
-                                      {
-                                          // Insert after the found node
-                                          uint32_t nextNode = orderPool_[insertAfter].next;
-                                          orderPool_[newPoolId].prev = insertAfter;
-                                          orderPool_[newPoolId].next = nextNode;
-                                          orderPool_[insertAfter].next = newPoolId;
-                                          if (nextNode != INVALID_ID)
-                                          {
-                                              orderPool_[nextNode].prev = newPoolId;
-                                          }
-                                          else
-                                          {
-                                              updated.tail = newPoolId;  // New tail
-                                          }
-                                      }
-                                      return updated;
-                                  });
+                        if (insertAfter == INVALID_ID)
+                        {
+                            // New order is the new head (smallest ID)
+                            orderPool_[newPoolId].next = updated.head;
+                            if (updated.head != INVALID_ID)
+                            {
+                                orderPool_[updated.head].prev = newPoolId;
+                            }
+                            updated.head = newPoolId;
+                        }
+                        else
+                        {
+                            // Insert after the found node
+                            uint32_t nextNode = orderPool_[insertAfter].next;
+                            orderPool_[newPoolId].prev = insertAfter;
+                            orderPool_[newPoolId].next = nextNode;
+                            orderPool_[insertAfter].next = newPoolId;
+                            if (nextNode != INVALID_ID)
+                            {
+                                orderPool_[nextNode].prev = newPoolId;
+                            }
+                            else
+                            {
+                                updated.tail = newPoolId;  // New tail
+                            }
+                        }
+                        return updated;
+                    });
             }
 
             updateBestAfterAdd<S>(price, shares);
@@ -425,38 +422,41 @@ namespace alpbook::nasdaq
 
             if (o.side == Side::Buy)
             {
-                decrementInner<Side::Buy>(id, price, o, shares, tag);
+                decrementInner<Side::Buy>(id, price, o, shares, it, tag);
             }
             else
             {
-                decrementInner<Side::Sell>(id, price, o, shares, tag);
+                decrementInner<Side::Sell>(id, price, o, shares, it, tag);
             }
             return {};
         }
 
         template<Side S, typename Tag>
-        ALPBOOK_INLINE void decrementInner(
-            uint64_t id, uint64_t price, Order& o, uint32_t shares, Tag tag)
+        ALPBOOK_INLINE void decrementInner(uint64_t id,
+                                           uint64_t price,
+                                           Order& o,
+                                           uint32_t shares,
+                                           OrderMap::iterator orderDetailsIt,
+                                           Tag tag)
         {
             constexpr bool buySide = (S == Side::Buy);
-            auto& levels = getLevels<S>();
 
             if (o.shares == shares)
             {
-                cancelImpl<S>(id, price, o, tag);
+                cancelImpl<S>(id, price, o, orderDetailsIt, tag);
                 return;
             }
             o.shares -= shares;
 
             uint32_t newTotalShares = 0;
-            levels.update_key(price,
-                              [&](PriceLevel const& level)
-                              {
-                                  PriceLevel updated = level;
-                                  updated.totalShares -= shares;
-                                  newTotalShares = updated.totalShares;
-                                  return updated;
-                              });
+            storage_.template updateLevel<S>(price,
+                                             [&](PriceLevel const& level)
+                                             {
+                                                 PriceLevel updated = level;
+                                                 updated.totalShares -= shares;
+                                                 newTotalShares = updated.totalShares;
+                                                 return updated;
+                                             });
 
             if constexpr (std::is_same_v<Tag, TagExecute>)
             {
@@ -479,10 +479,10 @@ namespace alpbook::nasdaq
         }
 
         template<Side S, typename Tag>
-        ALPBOOK_INLINE void cancelImpl(uint32_t id, uint64_t price, Order const& o, Tag tag)
+        ALPBOOK_INLINE void cancelImpl(
+            uint32_t id, uint64_t price, Order const& o, OrderMap::iterator orderDetailsIt, Tag tag)
         {
             constexpr bool buySide = (S == Side::Buy);
-            auto& levels = getLevels<S>();
 
             if constexpr (std::is_same_v<Tag, TagExecute>)
             {
@@ -498,21 +498,37 @@ namespace alpbook::nasdaq
                 orderPool_[o.next].prev = o.prev;
             }
 
-            // Get current level info to determine if we should erase or update
-            auto it = levels.find(price);
-            uint32_t oldTotal = it->second.totalShares;
-            uint32_t newTotal = oldTotal - o.shares;
+            bool levelErased = false;
+            uint32_t newTotal = 0;
+            storage_.template updateLevel<S>(price,
+                                             [&](PriceLevel const& level)
+                                             {
+                                                 PriceLevel updated = level;
+                                                 updated.totalShares -= o.shares;
+                                                 newTotal = updated.totalShares;
+
+                                                 if (o.prev == INVALID_ID)
+                                                 {
+                                                     updated.head = o.next;
+                                                 }
+                                                 if (o.next == INVALID_ID)
+                                                 {
+                                                     updated.tail = o.prev;
+                                                 }
+                                                 if (newTotal == 0)
+                                                     levelErased = true;
+                                                 return updated;
+                                             });
 
             Level& best = buySide ? bestBid_ : bestAsk_;
             bool wasTop = (price == best.price);
 
-            if (newTotal == 0)
+            if (levelErased)
             {
-                levels.erase_key(price);
-
+                storage_.template eraseLevel<S>(price);
                 if (wasTop)
                 {
-                    best = getBest(levels);
+                    best = storage_.template getBest<S>();
                     if constexpr (buySide)
                     {
                         listener_->onTopBidChange(best.price, best.quantity);
@@ -523,41 +539,21 @@ namespace alpbook::nasdaq
                     }
                 }
             }
-            else
+            else if (wasTop)
             {
-                // Update level with new total and updated head/tail pointers
-                levels.update_key(price,
-                                  [&](PriceLevel const& level)
-                                  {
-                                      PriceLevel updated = level;
-                                      updated.totalShares = newTotal;
-                                      if (o.prev == INVALID_ID)  // was head
-                                      {
-                                          updated.head = o.next;
-                                      }
-                                      if (o.next == INVALID_ID)  // was tail
-                                      {
-                                          updated.tail = o.prev;
-                                      }
-                                      return updated;
-                                  });
-
-                if (wasTop)
+                best.quantity = newTotal;
+                if constexpr (buySide)
                 {
-                    best.quantity = newTotal;
-                    if constexpr (buySide)
-                    {
-                        listener_->onTopBidChange(best.price, best.quantity);
-                    }
-                    else
-                    {
-                        listener_->onTopAskChange(best.price, best.quantity);
-                    }
+                    listener_->onTopBidChange(best.price, best.quantity);
+                }
+                else
+                {
+                    listener_->onTopAskChange(best.price, best.quantity);
                 }
             }
 
             orderPool_.deallocate(id);
-            orderToDetails_.erase(o.id);
+            orderToDetails_.erase(orderDetailsIt);
         }
 
         template<typename M>
@@ -571,46 +567,44 @@ namespace alpbook::nasdaq
             return {.price = it->first, .quantity = it->second.totalShares};
         }
 
-        template<typename M>
-        Level getLevelAtDepth(M const& levels, uint32_t depth) const
-        {
-            auto it = levels.begin();
-            if (it == levels.end()) [[unlikely]]
-            {
-                return Level {};
-            }
-            for (uint32_t i = 0; i < depth; i++)
-            {
-                ++it;
-                if (it == levels.end()) [[unlikely]]
-                {
-                    return Level {};
-                }
-            }
-            return {.price = it->first, .quantity = it->second.totalShares};
-        }
-
-        template<typename M>
+        template<Side S>
         [[nodiscard]] std::expected<quantity_t, BookError> getVolumeAheadByOrderImpl(
-            M const& levels, uint64_t orderID) const noexcept
+            uint64_t orderID) const noexcept
         {
             auto it = orderToDetails_.find(orderID);
             if (it == orderToDetails_.end()) [[unlikely]]
             {
                 return std::unexpected(BookError::MissingId);
             }
-
             auto [id, orderPrice] = it->second;
-            auto levelIt = levels.find(orderPrice);
-            if (levelIt == levels.end()) [[unlikely]]
+            uint64_t volume = 0;
+            uint32_t currentId = INVALID_ID;
+            if constexpr (std::is_same_v<Policy, PolicyTree>)
             {
-                return std::unexpected(BookError::MissingId);
+                auto const& levels = (S == Side::Buy ? storage_.bidLevels_ : storage_.askLevels_);
+                auto levelIt = levels.find(orderPrice);
+
+                if (levelIt == levels.end()) [[unlikely]]
+                {
+                    return std::unexpected(BookError::MissingId);
+                }
+
+                volume = levels.sum_exclusive(levelIt);
+                currentId = levelIt->second.head;
             }
-            auto const& level = levelIt->second;
+            else
+            {
+                volume = storage_.template getVolumeAhead<S>(orderPrice);
 
-            uint64_t volume = levels.sum_exclusive(levelIt);
+                auto const& dataMap = (S == Side::Buy ? storage_.bidData_ : storage_.askData_);
+                auto dataIt = dataMap.find(orderPrice);
 
-            uint32_t currentId = level.head;
+                if (dataIt == dataMap.end()) [[unlikely]]
+                {
+                    return std::unexpected(BookError::MissingId);
+                }
+                currentId = storage_.getLevel(dataIt->second).head;
+            }
             while (currentId != INVALID_ID && currentId != id)
             {
                 Order const& o = orderPool_[currentId];
@@ -645,8 +639,7 @@ namespace alpbook::nasdaq
         std::pmr::monotonic_buffer_resource monotonicResource_;
         std::pmr::unsynchronized_pool_resource poolResource_;
 
-        BidMap<PmrAllocator> bidLevels_;
-        AskMap<PmrAllocator> askLevels_;
+        Storage storage_;
 
         internal::ObjectPool<Order> orderPool_ {OrderPoolSize};
         OrderMap orderToDetails_ {};
