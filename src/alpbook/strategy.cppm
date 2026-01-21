@@ -19,7 +19,9 @@ namespace alpbook::strategy
             { strategy.onTrade(price, qty, side) } -> std::same_as<void>;
             { strategy.onTopBidChange(price, qty) } -> std::same_as<void>;
             { strategy.onTopAskChange(price, qty) } -> std::same_as<void>;
+
             { strategy.onSystemHalt() } -> std::same_as<void>;
+            { strategy.onRecoveryStart() } -> std::same_as<void>;
             { strategy.onSystemRestart() } -> std::same_as<void>;
         };
 

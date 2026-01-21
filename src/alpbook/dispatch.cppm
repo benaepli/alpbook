@@ -4,6 +4,7 @@ module;
 #include <concepts>
 #include <expected>
 #include <limits>
+#include <new>
 #include <optional>
 #include <print>
 #include <thread>
@@ -87,16 +88,24 @@ namespace alpbook
 
         ~Dispatcher()
         {
-            for (auto& worker : workers_)
+            if (workers_ptr_)
             {
-                worker->running.store(false, std::memory_order_release);
-            }
-            for (auto& worker : workers_)
-            {
-                if (worker->thread.joinable())
+                for (uint32_t i = 0; i < workerCount_; ++i)
                 {
-                    worker->thread.join();
+                    workers_ptr_[i].running.store(false, std::memory_order_release);
                 }
+                for (uint32_t i = 0; i < workerCount_; ++i)
+                {
+                    if (workers_ptr_[i].thread.joinable())
+                    {
+                        workers_ptr_[i].thread.join();
+                    }
+                }
+                for (uint32_t i = 0; i < workerCount_; ++i)
+                {
+                    workers_ptr_[i].~Worker();
+                }
+                ::operator delete[](workers_ptr_, std::align_val_t {alignof(Worker)});
             }
         }
 
@@ -130,18 +139,20 @@ namespace alpbook
 
             mapper_->setThreadCount(cores);
 
-            workers_.reserve(cores);
-            for (uint32_t i = 0; i < cores; i++)
+            workerCount_ = cores;
+            workers_ptr_ = static_cast<Worker*>(::operator new[](
+                sizeof(Worker) * workerCount_, std::align_val_t {alignof(Worker)}));
+
+            for (uint32_t i = 0; i < workerCount_; ++i)
             {
-                auto worker = std::make_unique<Worker>();
-                worker->core = i;
-                worker->running.store(true);
-                workers_.push_back(std::move(worker));
+                new (&workers_ptr_[i]) Worker();
+                workers_ptr_[i].core = i;
+                workers_ptr_[i].running.store(true);
             }
-            for (uint32_t i = 0; i < cores; i++)
+            for (uint32_t i = 0; i < workerCount_; ++i)
             {
-                workers_[i]->thread = std::thread([this, i, fact = factory_, mapper = mapper_]
-                                                  { workerLoop(i, fact, *mapper); });
+                workers_ptr_[i].thread = std::thread([this, i, fact = factory_, mapper = mapper_]
+                                                     { workerLoop(i, fact, *mapper); });
             }
             return cores;
         }
@@ -153,15 +164,15 @@ namespace alpbook
             uint32_t threadIdx = mapper_->getWorkerIndex(id);
             if (threadIdx != DROP_MSG)
             {
-                workers_[threadIdx]->queue.enqueue(slot);
+                workers_ptr_[threadIdx].queue.enqueue(slot);
             }
         }
 
       private:
         void workerLoop(uint32_t core, F factory, M const& mapper)
         {
-            auto& queue = workers_[core]->queue;
-            auto& running = workers_[core]->running;
+            auto& queue = workers_ptr_[core].queue;
+            auto& running = workers_ptr_[core].running;
             pinner_->pinToCore(core);
             auto sink = factory.create(core, mapper);
 
@@ -197,7 +208,8 @@ namespace alpbook
                 moodycamel::ReaderWriterQueue<Slot> queue {16384};
             std::thread thread;
         };
-        std::vector<std::unique_ptr<Worker>> workers_ {};
+        Worker* workers_ptr_ = nullptr;
+        uint32_t workerCount_ = 0;
     };
 
     /// Specialization for single-threaded, immediate dispatch.

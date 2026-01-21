@@ -67,7 +67,7 @@ namespace alpbook::itch
 
     /// Parse an ITCH message and dispatch to the listener.
     export template<OrderListener L>
-    void parse(ItchBytes bytes, L& listener) noexcept
+    [[gnu::always_inline]] void parse(ItchBytes bytes, L& listener) noexcept
     {
         char const msgType = bytes[0];
 

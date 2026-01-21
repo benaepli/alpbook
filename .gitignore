@@ -14,3 +14,4 @@ compile_commands.jsonCMakeUserPresets.json
 massif.out.*
 output*
 heaptrack*
+pgo_data

@@ -62,7 +62,9 @@ FetchContent_MakeAvailable(zlib)
 
 add_subdirectory(deps/BppTree)
 
-add_library(alpbook)
+add_library(alpbook src/alpbook/internal/hints.hpp)
+
+target_include_directories(alpbook PRIVATE src)
 
 target_sources(alpbook
         PUBLIC

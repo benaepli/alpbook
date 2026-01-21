@@ -76,6 +76,7 @@ namespace alpbook_latency
         void onTopBidChange(alpbook::price_t, alpbook::quantity_t) { record(); }
         void onTopAskChange(alpbook::price_t, alpbook::quantity_t) { record(); }
         void onSystemHalt() {}
+        void onRecoveryStart() {}
         void onSystemRestart() {}
 
         void jobStartedAt(uint64_t tsc) { lastTsc_ = tsc; }

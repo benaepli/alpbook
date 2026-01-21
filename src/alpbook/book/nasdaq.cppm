@@ -10,6 +10,7 @@ import alpbook.internal;
 #include <memory_resource>
 
 #include "absl/container/flat_hash_map.h"
+#include "alpbook/internal/hints.hpp"
 
 export module alpbook.book.nasdaq;
 
@@ -148,7 +149,8 @@ namespace alpbook::nasdaq
             return getVolumeAheadByOrderImpl(askLevels_, orderID);
         }
 
-        void add(AddOrder order)
+        /// Adds an order. Assumes that this function is called in the correct order by ID.
+        ALPBOOK_INLINE void add(AddOrder order)
         {
             if (order.side == Side::Buy)
             {
@@ -160,6 +162,20 @@ namespace alpbook::nasdaq
             }
         }
 
+        /// Adds an order during recovery. Uses the order ID to search for the correct place to
+        /// insert.
+        void addUnordered(AddOrder order)
+        {
+            if (order.side == Side::Buy)
+            {
+                addUnorderedImpl<Side::Buy>(order.timestamp, order.id, order.price, order.shares);
+            }
+            else
+            {
+                addUnorderedImpl<Side::Sell>(order.timestamp, order.id, order.price, order.shares);
+            }
+        }
+
         std::expected<void, BookError> execute(ExecuteOrder order)
         {
             return decrementImpl(order.id, order.shares, TagExecute {});
@@ -168,7 +184,8 @@ namespace alpbook::nasdaq
         {
             return decrementImpl(order.id, order.shares, TagChange {});
         }
-        std::expected<void, BookError> cancel(CancelOrder order)
+
+        ALPBOOK_INLINE std::expected<void, BookError> cancel(CancelOrder order)
         {
             auto it = orderToDetails_.find(order.id);
             if (it == orderToDetails_.end()) [[unlikely]]
@@ -191,7 +208,7 @@ namespace alpbook::nasdaq
 
         /// Replace is equivalent to cancelling an order and inserting a new one.
         /// Replaced orders lose time priority.
-        std::expected<void, BookError> replace(ReplaceOrder order)
+        ALPBOOK_INLINE std::expected<void, BookError> replace(ReplaceOrder order)
         {
             auto it = orderToDetails_.find(order.oldId);
             if (it == orderToDetails_.end()) [[unlikely]]
@@ -228,9 +245,43 @@ namespace alpbook::nasdaq
         }
 
         template<Side S>
-        void addImpl(uint64_t timestamp, uint64_t orderId, uint64_t price, uint32_t shares)
+        void updateBestAfterAdd(uint64_t price, uint32_t shares)
         {
             constexpr bool buySide = (S == Side::Buy);
+            Level& best = buySide ? bestBid_ : bestAsk_;
+
+            if (price == best.price)
+            {
+                best.quantity += shares;
+                if constexpr (buySide)
+                {
+                    listener_->onTopBidChange(best.price, best.quantity);
+                }
+                else
+                {
+                    listener_->onTopAskChange(best.price, best.quantity);
+                }
+            }
+            else if (isNewBest(price, best, S))
+            {
+                best = {price, shares};
+                if constexpr (buySide)
+                {
+                    listener_->onTopBidChange(best.price, best.quantity);
+                }
+                else
+                {
+                    listener_->onTopAskChange(best.price, best.quantity);
+                }
+            }
+        }
+
+        template<Side S>
+        ALPBOOK_INLINE void addImpl(uint64_t timestamp,
+                                    uint64_t orderId,
+                                    uint64_t price,
+                                    uint32_t shares)
+        {
             auto& levels = getLevels<S>();
 
             auto newId = orderPool_.allocate(timestamp, orderId, shares, INVALID_ID, INVALID_ID, S);
@@ -259,37 +310,82 @@ namespace alpbook::nasdaq
                 levels.insert_v(price, newLevel);
             }
 
-            Level& best = buySide ? bestBid_ : bestAsk_;
-            if (price == best.price)
-            {
-                best.quantity += shares;
-                if constexpr (buySide)
-                {
-                    listener_->onTopBidChange(best.price, best.quantity);
-                }
-                else
-                {
-                    listener_->onTopAskChange(best.price, best.quantity);
-                }
-            }
-            else if (isNewBest(price, best, S))
-            {
-                best = {price, shares};
-                if constexpr (buySide)
-                {
-                    listener_->onTopBidChange(best.price, best.quantity);
-                }
-                else
-                {
-                    listener_->onTopAskChange(best.price, best.quantity);
-                }
-            }
-
+            updateBestAfterAdd<S>(price, shares);
             orderToDetails_[orderId] = {.orderId = newId, .price = price};
         }
 
+        template<Side S>
+        void addUnorderedImpl(uint64_t timestamp, uint64_t orderId, uint64_t price, uint32_t shares)
+        {
+            auto& levels = getLevels<S>();
+            auto newPoolId =
+                orderPool_.allocate(timestamp, orderId, shares, INVALID_ID, INVALID_ID, S);
+
+            if (!levels.contains(price))
+            {
+                PriceLevel newLevel {.head = newPoolId, .tail = newPoolId, .totalShares = shares};
+                levels.insert_v(price, newLevel);
+            }
+            else
+            {
+                levels.update_key(price,
+                                  [&](PriceLevel const& level)
+                                  {
+                                      PriceLevel updated = level;
+                                      updated.totalShares += shares;
+
+                                      // Search from the back for insertion point
+                                      uint32_t current = level.tail;
+                                      uint32_t insertAfter = INVALID_ID;
+
+                                      while (current != INVALID_ID)
+                                      {
+                                          if (orderPool_[current].id < orderId)
+                                          {
+                                              insertAfter = current;
+                                              break;
+                                          }
+                                          current = orderPool_[current].prev;
+                                      }
+
+                                      if (insertAfter == INVALID_ID)
+                                      {
+                                          // New order is the new HEAD (smallest ID)
+                                          orderPool_[newPoolId].next = updated.head;
+                                          if (updated.head != INVALID_ID)
+                                          {
+                                              orderPool_[updated.head].prev = newPoolId;
+                                          }
+                                          updated.head = newPoolId;
+                                      }
+                                      else
+                                      {
+                                          // Insert after the found node
+                                          uint32_t nextNode = orderPool_[insertAfter].next;
+                                          orderPool_[newPoolId].prev = insertAfter;
+                                          orderPool_[newPoolId].next = nextNode;
+                                          orderPool_[insertAfter].next = newPoolId;
+                                          if (nextNode != INVALID_ID)
+                                          {
+                                              orderPool_[nextNode].prev = newPoolId;
+                                          }
+                                          else
+                                          {
+                                              updated.tail = newPoolId;  // New tail
+                                          }
+                                      }
+                                      return updated;
+                                  });
+            }
+
+            updateBestAfterAdd<S>(price, shares);
+            orderToDetails_[orderId] = {.orderId = newPoolId, .price = price};
+        }
+
         template<typename Tag>
-        std::expected<void, BookError> decrementImpl(uint64_t orderId, uint32_t shares, Tag tag)
+        ALPBOOK_INLINE std::expected<void, BookError> decrementImpl(uint64_t orderId,
+                                                                    uint32_t shares,
+                                                                    Tag tag)
         {
             auto it = orderToDetails_.find(orderId);
             if (it == orderToDetails_.end()) [[unlikely]]
@@ -311,7 +407,8 @@ namespace alpbook::nasdaq
         }
 
         template<Side S, typename Tag>
-        void decrementInner(uint64_t id, uint64_t price, Order& o, uint32_t shares, Tag tag)
+        ALPBOOK_INLINE void decrementInner(
+            uint64_t id, uint64_t price, Order& o, uint32_t shares, Tag tag)
         {
             constexpr bool buySide = (S == Side::Buy);
             auto& levels = getLevels<S>();
@@ -354,7 +451,7 @@ namespace alpbook::nasdaq
         }
 
         template<Side S, typename Tag>
-        void cancelImpl(uint32_t id, uint64_t price, Order const& o, Tag tag)
+        ALPBOOK_INLINE void cancelImpl(uint32_t id, uint64_t price, Order const& o, Tag tag)
         {
             constexpr bool buySide = (S == Side::Buy);
             auto& levels = getLevels<S>();
