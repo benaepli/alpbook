@@ -18,7 +18,7 @@ export import :listener;
 
 namespace alpbook::itch
 {
-    export enum class MessageOrigin : uint8_t
+    export enum class MessageType : uint8_t
     {
         Live = 0,
         Recovery = 1,
@@ -31,7 +31,8 @@ namespace alpbook::itch
     export template<bool Benchmark = false>
     struct alignas(std::hardware_destructive_interference_size) ItchSlot
     {
-        MessageOrigin type;
+        MessageType type;
+        /// If message type is not live or recovery, data will be unused.
         ItchBytes data;
         [[no_unique_address]] std::conditional_t<Benchmark, int64_t, std::monostate>
             dispatchTimestamp;

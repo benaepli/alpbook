@@ -121,7 +121,7 @@ namespace alpbook::nasdaq
                 [[unlikely]] case itch::MessageOrigin::SnapshotStart:
                 {
                     beginRecovery();
-                    return true;
+                    return false;
                 }
                 [[unlikely]] case itch::MessageOrigin::SnapshotEnd:
                 {
@@ -131,7 +131,7 @@ namespace alpbook::nasdaq
                         return false;
                     }
                     endRecovery();
-                    return true;
+                    return false;
                 }
                 default:
                     return true;

@@ -71,6 +71,7 @@ namespace alpbook
         using Sink = F::SinkType;
 
         static constexpr uint32_t DROP_MSG = std::numeric_limits<uint32_t>::max();
+        constexpr uint32_t BROADCAST_MSG = 0xFFFFFFFE;
 
       public:
         explicit Dispatcher(M& mapper, F factory)
@@ -162,7 +163,14 @@ namespace alpbook
         {
             uint16_t id = E::extractID(slot);
             uint32_t threadIdx = mapper_->getWorkerIndex(id);
-            if (threadIdx != DROP_MSG)
+            if (threadIdx == BROADCAST_MSG)
+            {
+                for (uint32_t i = 0; i < workerCount_; ++i)
+                {
+                    workers_ptr_[i].queue.enqueue(slot);
+                }
+            }
+            else if (threadIdx != DROP_MSG)
             {
                 workers_ptr_[threadIdx].queue.enqueue(slot);
             }

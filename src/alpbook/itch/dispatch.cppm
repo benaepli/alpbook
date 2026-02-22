@@ -43,6 +43,7 @@ namespace alpbook::itch
             {
                 distributeAssigned();
             }
+            lookupTable_[0] = UNASSIGNED - 1;
         }
 
         [[nodiscard]] uint32_t getWorkerIndex(IdType id) const noexcept { return lookupTable_[id]; }

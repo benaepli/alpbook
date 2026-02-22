@@ -222,18 +222,26 @@ namespace alpbook::nasdaq
         uint64_t getVolumeAhead(uint64_t price) const
         {
             if constexpr (S == Side::Buy)
+            {
                 return getVolumeAheadImpl(bidLevels_, price);
+            }
             else
+            {
                 return getVolumeAheadImpl(askLevels_, price);
+            }
         }
 
         template<Side S>
         Level getLevelAtDepth(uint32_t depth) const
         {
             if constexpr (S == Side::Buy)
+            {
                 return getLevelAtDepthImpl(bidLevels_, depth);
+            }
             else
+            {
                 return getLevelAtDepthImpl(askLevels_, depth);
+            }
         }
     };
 
@@ -301,9 +309,13 @@ namespace alpbook::nasdaq
             for (uint64_t p : orderSet)
             {
                 if (p == price)
+                {
                     break;
+                }
                 if (compareLess(p, price))
+                {
                     break;
+                }
 
                 uint32_t idx = dataMap.find(p)->second;
                 volume += levelPool_[idx].totalShares;
@@ -331,9 +343,13 @@ namespace alpbook::nasdaq
         Level getBest() const
         {
             if constexpr (S == Side::Buy)
+            {
                 return getBestImpl(bidOrder_, bidData_);
+            }
             else
+            {
                 return getBestImpl(askOrder_, askData_);
+            }
         }
 
         template<Side S>
@@ -425,9 +441,13 @@ namespace alpbook::nasdaq
         Level getLevelAtDepth(uint32_t depth) const
         {
             if constexpr (S == Side::Buy)
+            {
                 return getLevelAtDepthImpl(bidOrder_, bidData_, depth);
+            }
             else
+            {
                 return getLevelAtDepthImpl(askOrder_, askData_, depth);
+            }
         }
     };
 }  // namespace alpbook::nasdaq

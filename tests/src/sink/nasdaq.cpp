@@ -16,7 +16,7 @@ using alpbook::price_t;
 using alpbook::quantity_t;
 using alpbook::Side;
 using alpbook::itch::ItchSlot;
-using alpbook::itch::MessageOrigin;
+using alpbook::itch::MessageType;
 using alpbook::nasdaq::AddOrder;
 using alpbook::nasdaq::CancelOrder;
 using alpbook::nasdaq::DecrementShares;
@@ -138,7 +138,7 @@ namespace TestHelpers
         uint16_t assetId, uint64_t orderId, uint32_t price, uint32_t shares, char side)
     {
         ItchSlot<> slot {};
-        slot.type = MessageOrigin::Live;
+        slot.type = MessageType::Live;
         slot.data[0] = 'A';
         writeField(slot, 1, assetId);
         writeTimestamp(slot, 1000);
@@ -152,7 +152,7 @@ namespace TestHelpers
     ItchSlot<> createExecuteOrder(uint16_t assetId, uint64_t orderId, uint32_t shares)
     {
         ItchSlot<> slot {};
-        slot.type = MessageOrigin::Live;
+        slot.type = MessageType::Live;
         slot.data[0] = 'E';
         writeField(slot, 1, assetId);
         writeField(slot, 11, orderId);
@@ -163,7 +163,7 @@ namespace TestHelpers
     ItchSlot<> createCancelOrder(uint16_t assetId, uint64_t orderId)
     {
         ItchSlot<> slot {};
-        slot.type = MessageOrigin::Live;
+        slot.type = MessageType::Live;
         slot.data[0] = 'D';
         writeField(slot, 1, assetId);
         writeField(slot, 11, orderId);
@@ -173,7 +173,7 @@ namespace TestHelpers
     ItchSlot<> createReduceOrder(uint16_t assetId, uint64_t orderId, uint32_t shares)
     {
         ItchSlot<> slot {};
-        slot.type = MessageOrigin::Live;
+        slot.type = MessageType::Live;
         slot.data[0] = 'X';
         writeField(slot, 1, assetId);
         writeField(slot, 11, orderId);
@@ -185,7 +185,7 @@ namespace TestHelpers
         uint16_t assetId, uint64_t oldId, uint64_t newId, uint32_t price, uint32_t shares)
     {
         ItchSlot<> slot {};
-        slot.type = MessageOrigin::Live;
+        slot.type = MessageType::Live;
         slot.data[0] = 'U';
         writeField(slot, 1, assetId);
         writeTimestamp(slot, 2000);
@@ -792,7 +792,7 @@ TYPED_TEST(RecoveryTest, SnapshotStartTriggersRecoveryAndRestoresHealth)
     EXPECT_TRUE(this->context->strategy.systemHaltCalled);
 
     // Trigger recovery with SnapshotStart
-    bool result = this->context->handleOrigin(MessageOrigin::SnapshotStart);
+    bool result = this->context->handleOrigin(MessageType::SnapshotStart);
 
     EXPECT_TRUE(result);
     EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Recovering);
@@ -808,7 +808,7 @@ TYPED_TEST(RecoveryTest, RecoveryClearsBookState)
     EXPECT_TRUE(bestBid.isValid());
 
     // Trigger recovery
-    [[maybe_unused]] auto recovered = this->context->handleOrigin(MessageOrigin::SnapshotStart);
+    [[maybe_unused]] auto recovered = this->context->handleOrigin(MessageType::SnapshotStart);
 
     // Book should be cleared
     bestBid = this->context->book.getBestBid();
@@ -823,7 +823,7 @@ TYPED_TEST(RecoveryTest, RecoveryAllowsNewOrdersAfterCircuitBreaker)
     EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Failed);
 
     // Trigger recovery
-    [[maybe_unused]] auto recovered = this->context->handleOrigin(MessageOrigin::SnapshotStart);
+    [[maybe_unused]] auto recovered = this->context->handleOrigin(MessageType::SnapshotStart);
 
     // Should be able to add new orders
     AddOrder addOrder {1000, 1, 100, 50, Side::Buy};
@@ -842,9 +842,9 @@ TYPED_TEST(RecoveryTest, HandleOriginReturnsFalseForNonSnapshotWhenUnhealthy)
     EXPECT_EQ(this->context->state, alpbook::nasdaq::ContextState::Failed);
 
     // Test all non-SnapshotStart origins return false when unhealthy
-    EXPECT_FALSE(this->context->handleOrigin(MessageOrigin::Live));
-    EXPECT_FALSE(this->context->handleOrigin(MessageOrigin::Recovery));
-    EXPECT_FALSE(this->context->handleOrigin(MessageOrigin::SnapshotEnd));
+    EXPECT_FALSE(this->context->handleOrigin(MessageType::Live));
+    EXPECT_FALSE(this->context->handleOrigin(MessageType::Recovery));
+    EXPECT_FALSE(this->context->handleOrigin(MessageType::SnapshotEnd));
 }
 
 template<typename Policy>
@@ -868,7 +868,7 @@ class RecoverySinkTest : public ::testing::Test
     ItchSlot<> createSnapshotStart(uint16_t assetId)
     {
         ItchSlot<> slot {};
-        slot.type = MessageOrigin::SnapshotStart;
+        slot.type = MessageType::SnapshotStart;
         slot.data[0] = 'S';  // Dummy message type
         TestHelpers::writeField(slot, 1, assetId);
         return slot;
