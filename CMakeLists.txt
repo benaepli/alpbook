@@ -50,6 +50,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(zlib)
 
+set(SPDLOG_USE_STD_FORMAT ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+        spdlog
+        GIT_REPOSITORY https://github.com/gabime/spdlog.git
+        GIT_TAG v1.17.0
+)
+FetchContent_MakeAvailable(spdlog)
+
 FetchContent_Declare(
         readerwriterqueue
         GIT_REPOSITORY https://github.com/cameron314/readerwriterqueue.git
