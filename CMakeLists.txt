@@ -50,6 +50,23 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(zlib)
 
+FetchContent_Declare(
+        readerwriterqueue
+        GIT_REPOSITORY https://github.com/cameron314/readerwriterqueue.git
+        GIT_TAG v1.0.6
+)
+FetchContent_MakeAvailable(readerwriterqueue)
+
+FetchContent_Declare(
+        hwloc
+        GIT_REPOSITORY https://github.com/open-mpi/hwloc.git
+        GIT_TAG hwloc-2.12.0
+        FIND_PACKAGE_ARGS
+)
+set(HWLOC_SKIP_LSTOPO ON CACHE BOOL "Skip building lstopo")
+set(HWLOC_SKIP_TOOLS ON CACHE BOOL "Skip building hwloc tools")
+FetchContent_MakeAvailable(hwloc)
+
 add_subdirectory(deps/BppTree)
 
 add_library(alpbook src/alpbook/internal/hints.hpp)
@@ -66,6 +83,7 @@ target_sources(alpbook
         src/alpbook/book/nasdaq-state.cppm
         src/alpbook/common.cppm
         src/alpbook/internal.cppm
+        src/alpbook/internal/backoff.cppm
         src/alpbook/internal/pool.cppm
         src/alpbook/itch.cppm
         src/alpbook/itch/messages.cppm

@@ -5,6 +5,7 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -41,7 +42,7 @@ namespace alpbook::itch
 
     export uint16_t parseID(ItchBytes const& msg)
     {
-        return parseField<uint16_t>(msg.data, 1);
+        return parseField<uint16_t>(msg, 1);
     };
 
     uint64_t parseTimestamp(ItchBytes const& msg)
@@ -72,6 +73,71 @@ namespace alpbook::itch
             return MessageClassification::StockTradingAction;
         }
         return MessageClassification::Ignored;
+    }
+
+    /// Parse an ITCH system event message and dispatch to the listener.
+    export template<SystemEventListener L>
+    ALPBOOK_INLINE void parseSystemEventMessage(ItchBytes bytes, L& listener) noexcept
+    {
+        char const eventCode = static_cast<char>(bytes[11]);
+        switch (eventCode)
+        {
+            case 'O':
+                listener.startOfMessages(events::StartOfMessages {});
+                break;
+            case 'S':
+                listener.startOfSystem(events::StartOfSystem {});
+                break;
+            case 'Q':
+                listener.startOfMarket(events::StartOfMarket {});
+                break;
+            case 'M':
+                listener.endOfMarket(events::EndOfMarket {});
+                break;
+            case 'E':
+                listener.endOfSystem(events::EndOfSystem {});
+                break;
+            case 'C':
+                listener.endOfMessages(events::EndOfMessages {});
+                break;
+            default:
+                break;
+        }
+    }
+
+    /// Parse an ITCH stock trading action message into the struct representation.
+    export ALPBOOK_INLINE std::optional<StockTradingAction> parseStockTradingActionMessage(
+        ItchBytes const& bytes) noexcept
+    {
+        if (bytes[0] != 'H')
+        {
+            return std::nullopt;
+        }
+
+        char const stateCode = static_cast<char>(bytes[19]);
+        switch (stateCode)
+        {
+            case 'T':
+            {
+                return StockTradingAction {.state = TradingState::Trading};
+            }
+            case 'H':
+            {
+                return StockTradingAction {.state = TradingState::Halt};
+            }
+            case 'P':
+            {
+                return StockTradingAction {.state = TradingState::Paused};
+            }
+            case 'Q':
+            {
+                return StockTradingAction {.state = TradingState::Quotation};
+            }
+            default:
+            {
+                return std::nullopt;
+            }
+        }
     }
 
     /// Parse an ITCH order-related message and dispatch to the listener.

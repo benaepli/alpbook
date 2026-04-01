@@ -36,7 +36,7 @@ namespace alpbook::itch
         bool authenticity;
     };
 
-    namespace events
+    export namespace events
     {
         struct StartOfMarket
         {
@@ -56,13 +56,23 @@ namespace alpbook::itch
 
         struct StartOfMessages
         {
-
         };
 
         struct EndOfMessages
         {
-
         };
-
     }  // namespace events
+
+    export enum class TradingState : uint8_t
+    {
+        Trading,
+        Halt,
+        Paused,
+        Quotation,
+    };
+
+    export struct StockTradingAction
+    {
+        TradingState state;
+    };
 }  // namespace alpbook::itch

@@ -3,6 +3,7 @@ module;
 #include <concepts>
 
 import alpbook.book.nasdaq;
+import alpbook.itch.messages;
 
 export module alpbook.itch.parsing:listener;
 
@@ -23,5 +24,22 @@ namespace alpbook::itch
         { listener.cancel(cancelMsg) } -> std::same_as<void>;
         { listener.replace(replaceMsg) } -> std::same_as<void>;
     };
+
+    export template<typename T>
+    concept SystemEventListener =
+        requires(T listener,
+                 events::StartOfMessages startMessages,
+                 events::StartOfSystem startSystem,
+                 events::StartOfMarket startMarket,
+                 events::EndOfMarket endMarket,
+                 events::EndOfSystem endSystem,
+                 events::EndOfMessages endMessages) {
+            { listener.startOfMessages(startMessages) } -> std::same_as<void>;
+            { listener.startOfSystem(startSystem) } -> std::same_as<void>;
+            { listener.startOfMarket(startMarket) } -> std::same_as<void>;
+            { listener.endOfMarket(endMarket) } -> std::same_as<void>;
+            { listener.endOfSystem(endSystem) } -> std::same_as<void>;
+            { listener.endOfMessages(endMessages) } -> std::same_as<void>;
+        };
 
 }  // namespace alpbook::itch

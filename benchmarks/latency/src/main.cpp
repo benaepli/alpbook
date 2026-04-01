@@ -10,8 +10,6 @@ import alpbook.dispatch;
 #include <iostream>
 #include <string>
 #include <thread>
-#include <variant> 
-
 #include <immintrin.h>
 
 import alpbook_latency.strategy;
@@ -30,11 +28,6 @@ void signal_handler(int)
 {
     Running = false;
 }
-
-// Custom exception to break the reading loop cleanly
-struct Interrupted : public std::exception
-{
-};
 
 // Parse thread count from command-line arguments
 int parseThreadCount(int argc, char** argv)
@@ -65,67 +58,6 @@ struct IsSynchronous<alpbook::Dispatcher<Slot, F, E, M, alpbook::SynchronousDisp
 
 template<typename T>
 inline constexpr bool IsSynchronous_v = IsSynchronous<T>::value;
-
-namespace alpbook_latency
-{
-    template<typename D>
-    struct DispatchHandler
-    {
-        static constexpr bool IsSynchronous = IsSynchronous_v<D>;
-
-        alpbook_latency::BenchmarkData* data;
-        D& dispatcher;
-
-        static constexpr int64_t TargetWaitNs = 1000;
-
-        // Only use these members in async mode
-        int64_t cyclesPerWait = 0;
-        [[no_unique_address]] std::conditional_t<IsSynchronous,
-                                                 std::monostate,
-                                                 alpbook::internal::Backoff<0, 100000>> backoff;
-
-        template<bool B>
-        void handle(alpbook::itch::ItchSlot<B>& slot)
-        {
-            if (!Running) [[unlikely]]
-            {
-                throw Interrupted();
-            }
-
-            // Only wait in async mode
-            if constexpr (!IsSynchronous)
-            {
-                if (cyclesPerWait == 0) [[unlikely]]
-                {
-                    // Calibration logic
-                    int64_t startTsc = data->clock.rdtsc();
-                    int64_t startNs = data->clock.tsc2ns(startTsc);
-
-                    while (data->clock.tsc2ns(data->clock.rdtsc()) - startNs < TargetWaitNs)
-                    {
-                        _mm_pause();
-                    }
-                    cyclesPerWait = data->clock.rdtsc() - startTsc;
-                }
-
-                // Wait logic
-                int64_t loopStart = data->clock.rdtsc();
-                while ((data->clock.rdtsc() - loopStart) < cyclesPerWait)
-                {
-                    backoff.pause();
-                }
-                backoff.reset();
-            }
-
-            // Record timestamp and dispatch (same for both modes)
-            if constexpr (B)
-            {
-                slot.dispatchTimestamp = data->clock.rdtsc();
-            }
-            dispatcher.dispatch(slot);
-        }
-    };
-}  // namespace alpbook_latency
 
 // Template function to run benchmark with either dispatcher type
 template<typename DispatcherType>
@@ -181,19 +113,60 @@ int runBenchmark(std::string const& inputFile,
         }
 
         std::cout << "Dispatcher initialized. Starting playback... (Ctrl+C to stop early)\n";
-        alpbook_latency::DispatchHandler handler {&sharedData, dispatcher};
-        auto result = alpbook::itch::readGzippedItch<decltype(handler), true>(inputFile, handler);
 
-        if (!result.has_value())
+        auto stream = alpbook::itch::ItchStream<true>::open(inputFile);
+        if (!stream.has_value())
         {
-            std::cerr << "Error reading ITCH file: " << result.error() << "\n";
+            std::cerr << "Error opening ITCH file: " << stream.error() << "\n";
             return 1;
         }
+
+        constexpr int64_t TargetWaitNs = 1000;
+        int64_t cyclesPerWait = 0;
+        alpbook::internal::Backoff<0, 100000> backoff;
+
+        while (Running)
+        {
+            auto msg = stream->next();
+            if (!msg.has_value())
+            {
+                if (msg.error() == alpbook::itch::StreamStatus::ReadError)
+                {
+                    std::cerr << "Read error in ITCH stream\n";
+                }
+                break;
+            }
+
+            auto& slot = *msg;
+
+            if constexpr (!IsSynchronous_v<DispatcherType>)
+            {
+                if (cyclesPerWait == 0) [[unlikely]]
+                {
+                    int64_t startTsc = sharedData.clock.rdtsc();
+                    int64_t startNs = sharedData.clock.tsc2ns(startTsc);
+
+                    while (sharedData.clock.tsc2ns(sharedData.clock.rdtsc()) - startNs
+                           < TargetWaitNs)
+                    {
+                        _mm_pause();
+                    }
+                    cyclesPerWait = sharedData.clock.rdtsc() - startTsc;
+                }
+
+                int64_t loopStart = sharedData.clock.rdtsc();
+                while ((sharedData.clock.rdtsc() - loopStart) < cyclesPerWait)
+                {
+                    backoff.pause();
+                }
+                backoff.reset();
+            }
+
+            slot.dispatchTimestamp = sharedData.clock.rdtsc();
+            dispatcher.dispatch(slot);
+        }
+
         std::cout << "Playback complete.\n";
-    }
-    catch (Interrupted const&)
-    {
-        std::cerr << "\nInterrupted by user. Cleaning up...\n";
     }
     catch (std::exception const& e)
     {
