@@ -9,10 +9,13 @@ module;
 
 #include <toml++/toml.hpp>
 
+import alpbook.itch;
+
 export module alpdaq.config;
 
 namespace alpdaq::config
 {
+
     export struct PinDisabled
     {
     };
@@ -43,7 +46,7 @@ namespace alpdaq::config
     {
         PinPolicy mainThread;
         PinPolicy logThread;
-        std::vector<std::string> stocks;
+        std::vector<alpbook::itch::StockTicker> stocks;
         DataSource dataSource;
         std::filesystem::path logDir;
     };
@@ -124,7 +127,8 @@ namespace alpdaq::config
                                + "\", expected \"network\" or \"simulated\"");
     }
 
-    auto parseStocks(toml::table const& tbl) -> std::expected<std::vector<std::string>, std::string>
+    auto parseStocks(toml::table const& tbl)
+        -> std::expected<std::vector<alpbook::itch::StockTicker>, std::string>
     {
         auto const stocks = tbl["stocks"];
         if (!stocks)
@@ -141,7 +145,7 @@ namespace alpdaq::config
             return std::unexpected(std::string("stocks list must not be empty"));
         }
 
-        std::vector<std::string> result;
+        std::vector<alpbook::itch::StockTicker> result;
         result.reserve(arr->size());
         for (auto const& elem : *arr)
         {
@@ -150,7 +154,15 @@ namespace alpdaq::config
             {
                 return std::unexpected(std::string("each stock must be a string"));
             }
-            result.emplace_back(str->get());
+            if (str->get().size() > alpbook::itch::STOCK_TICKER_LEN)
+            {
+                return std::unexpected(std::format("stock ticker \"{}\" exceeds max length {}",
+                                                   str->get(), alpbook::itch::STOCK_TICKER_LEN));
+            }
+            alpbook::itch::StockTicker ticker {};
+            ticker.fill(' ');
+            std::copy(str->get().begin(), str->get().end(), ticker.begin());
+            result.push_back(ticker);
         }
         return result;
     }

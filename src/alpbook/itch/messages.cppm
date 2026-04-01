@@ -27,10 +27,13 @@ namespace alpbook::itch
         Ignored,
     };
 
+    export constexpr auto STOCK_TICKER_LEN = 8UL;
+    export using StockTicker = std::array<uint8_t, STOCK_TICKER_LEN>;
+
     /// Relevant fields in the stock directory message.
     export struct StockDirectory
     {
-        std::array<uint8_t, 8> stock;
+        StockTicker stock;
 
         /// Drop the message if it's inauthentic.
         bool authenticity;

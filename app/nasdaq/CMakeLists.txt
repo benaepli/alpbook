@@ -11,6 +11,7 @@ target_sources(alpdaq
         src/logging/logger.cppm
         src/logging/messages.cppm
         src/placement.cppm
+        src/system.cppm
 )
 
 target_link_libraries(alpdaq
