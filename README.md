@@ -2,7 +2,7 @@
 
 **A fast, extensible order book library in C++23**
 
-alpbook is my C++23-modules order book library built for
+alpbook is my C++23 modules order book library built for
 high-throughput, low-latency market data processing. It parses and replays
 NASDAQ ITCH 5.0 feed data, maintains per-symbol order books, and delivers
 top-of-book and trade events to user-defined strategies.
@@ -19,7 +19,9 @@ Key design decisions:
   routes ITCH messages across pinned worker threads; a `SynchronousDispatch`
   policy collapses everything to a single-threaded call for profiling and testing.
 
-Note: this is an personal exploration of trading systems and is not tested for non-simulated environments (yet).
+Note: this is a personal exploration of trading systems and is not tested for non-simulated environments (yet).
+
+See my other project [avalanche](https://github.com/benaepli/avalanche) for a Rust simulator of ITCH network traffic.
 
 ## Building from Source
 
@@ -50,18 +52,21 @@ see [docs/building.md](docs/building.md).
 All dependencies are fetched either locally or with `FetchContent`.
 
 | Dependency                                                           | Version    | Purpose                                               |
-| -------------------------------------------------------------------- | ---------- | ----------------------------------------------------- |
+|----------------------------------------------------------------------|------------|-------------------------------------------------------|
 | [abseil-cpp](https://github.com/abseil/abseil-cpp)                   | 20240116.2 | `btree_map`, `uint128` price/qty types                |
 | [hwloc](https://github.com/open-mpi/hwloc)                           | 2.12.0     | CPU topology queries and thread pinning               |
 | [readerwriterqueue](https://github.com/cameron314/readerwriterqueue) | 1.0.7      | Lock-free SPSC queue for async dispatch               |
 | [zlib](https://github.com/madler/zlib)                               | 1.3.1      | Gzip decompression of `.itch.gz` feed files           |
 | [GTest](https://github.com/google/googletest)                        | latest     | Unit test framework                                   |
 | [BppTree](deps/BppTree)                                              | local      | Augmented B-tree used by `PolicyTree` storage backend |
-| [tscns](deps/tscns)                                                  | local      | TSC-based nanosecond clock for benchmarking           |
+| [tscns](deps/tscns)                                                  | local      | rdtsc-based nanosecond clock for benchmarking         |
 
 ## Benchmarks
 
-The [benchmarks](benchmarks/) folder contains latency tests for the order book library. These benchmarks measure userspace end-to-end processing time of ITCH messages, from the dispatcher parsing the message to the corresponding book event being delivered to a strategy. Both single-threaded synchronous and multi-threaded queued dispatch modes are evaluated.
+The [benchmarks](benchmarks/) folder contains latency tests for the order book library. These benchmarks measure
+userspace end-to-end processing time of ITCH messages, from the dispatcher parsing the message to the corresponding book
+event being delivered to a strategy. Both single-threaded synchronous and multi-threaded queued dispatch modes are
+evaluated.
 
 ### Conditions
 
@@ -70,7 +75,7 @@ I ran these benchmarks on my Framework laptop with a Ryzen 7 7840U on Fedora 42.
 ### Latency
 
 | Mode                  | P50 (ns) | P95 (ns) | P99 (ns) |
-| --------------------- | -------- | -------- | -------- |
+|-----------------------|----------|----------|----------|
 | Synchronous           | 120      | 421.0    | 681      |
 | Multi-threaded queued | 220      | 1082     | 1899     |
 
@@ -119,7 +124,8 @@ static_assert(alpbook::strategy::Strategy<
     alpbook::nasdaq::Book<alpbook::nasdaq::PolicyHash, MyStrategy>>);
 ```
 
-Provide a _strategy factory_ to create strategies, and a _sink factory_ so the dispatcher can mint one sink (and its strategies) per worker thread:
+Provide a _strategy factory_ to create strategies, and a _sink factory_ so the dispatcher can mint one sink (and its
+strategies) per worker thread:
 
 ```cpp
 struct MyStrategyFactory {
