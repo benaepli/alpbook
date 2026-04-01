@@ -23,4 +23,5 @@ namespace alpbook::itch
         { listener.cancel(cancelMsg) } -> std::same_as<void>;
         { listener.replace(replaceMsg) } -> std::same_as<void>;
     };
+
 }  // namespace alpbook::itch

@@ -8,9 +8,11 @@ module;
 #include <variant>
 #include <vector>
 
+#include "alpbook/internal/hints.hpp"
+
 import alpbook.book.nasdaq;
-import alpbook.dispatch;
 import alpbook.common;
+import alpbook.itch.messages;
 
 export module alpbook.itch.parsing;
 
@@ -18,21 +20,11 @@ export import :listener;
 
 namespace alpbook::itch
 {
-    export enum class MessageType : uint8_t
-    {
-        Live = 0,
-        Recovery = 1,
-        SnapshotStart = 2,
-        SnapshotEnd = 3
-    };
-
     using ItchBytes = std::array<uint8_t, 55>;
 
     export template<bool Benchmark = false>
     struct alignas(std::hardware_destructive_interference_size) ItchSlot
     {
-        MessageType type;
-        /// If message type is not live or recovery, data will be unused.
         ItchBytes data;
         [[no_unique_address]] std::conditional_t<Benchmark, int64_t, std::monostate>
             dispatchTimestamp;
@@ -47,17 +39,10 @@ namespace alpbook::itch
         return std::byteswap(val);
     }
 
-    export struct ItchExtractor
+    export uint16_t parseID(ItchBytes const& msg)
     {
-        template<bool B>
-        static uint16_t extractID(ItchSlot<B> const& msg)
-        {
-            return parseField<uint16_t>(msg.data, 1);
-        }
+        return parseField<uint16_t>(msg.data, 1);
     };
-
-    static_assert(DispatchSlot<ItchSlot<true>>);
-    static_assert(IDExtractor<ItchSlot<>, ItchExtractor>);
 
     uint64_t parseTimestamp(ItchBytes const& msg)
     {
@@ -66,9 +51,34 @@ namespace alpbook::itch
         return (high << 32) | low;
     }
 
-    /// Parse an ITCH message and dispatch to the listener.
+    export ALPBOOK_INLINE MessageClassification classifyMessage(ItchBytes const& msg)
+    {
+        char const msgType = msg[0];
+        [[likely]] if (msgType == 'A' || msgType == 'F' || msgType == 'E' || msgType == 'C'
+                       || msgType == 'X' || msgType == 'D' || msgType == 'U')
+        {
+            return MessageClassification::Order;
+        }
+        if (msgType == 'R')
+        {
+            return MessageClassification::StockDirectory;
+        }
+        if (msgType == 'S')
+        {
+            return MessageClassification::SystemEvent;
+        }
+        if (msgType == 'H')
+        {
+            return MessageClassification::StockTradingAction;
+        }
+        return MessageClassification::Ignored;
+    }
+
+    /// Parse an ITCH order-related message and dispatch to the listener.
+    /// Order-related messages are the ones directly consumed by order books
+    /// and should be parsed after you know the correct locate ID.
     export template<OrderListener L>
-    [[gnu::always_inline]] void parse(ItchBytes bytes, L& listener) noexcept
+    ALPBOOK_INLINE void parseOrderMessage(ItchBytes bytes, L& listener) noexcept
     {
         char const msgType = bytes[0];
 
