@@ -34,7 +34,7 @@ namespace alpbook::itch
             return ItchStream(file);
         }
 
-        std::expected<ItchSlot<Benchmark>&, StreamStatus> next()
+        std::expected<std::reference_wrapper<ItchSlot<Benchmark>>, StreamStatus> next()
         {
             int bytesRead = gzread(file_, &msgLenBigEndian_, sizeof(msgLenBigEndian_));
             if (bytesRead < static_cast<int>(sizeof(msgLenBigEndian_)))

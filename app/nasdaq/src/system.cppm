@@ -13,69 +13,16 @@ module;
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+import alpdaq.internal;
 import alpdaq.logging;
+import alpdaq.system.state;
 import alpbook.itch;
 
 export module alpdaq.system;
 
 namespace alpdaq
 {
-    enum class SystemState : uint8_t
-    {
-        /// Waiting to process the first message.
-        Waiting,
-
-        /// Startup: in this state we process primarily just directory mapping messages and system
-        /// events.
-        Startup,
-
-        Live,
-
-        Recovery,
-
-        EndOfDay,
-    };
-
-    export using SessionId = std::array<uint8_t, 10>;
-
-    export struct SessionChanged
-    {
-        SessionId newSession;
-    };
-
-    /// Gap recovery occurs if we don't need to restart from sequence number 1.
-    export struct GapRecovery
-    {
-    };
-    /// Total recovery indicates that all books should be cleared.
-    export struct TotalRecovery
-    {
-    };
-    export struct RecoveryComplete
-    {
-    };
-    export struct FatalError
-    {
-    };
-
-    /// If a given message produces a source event, the source event should be processed
-    /// before any data corresponding to that message.
-    export using SourceEvent =
-        std::variant<SessionChanged, GapRecovery, TotalRecovery, RecoveryComplete, FatalError>;
-
-    template<typename... Ts>
-    struct Overload : Ts...
-    {
-        using Ts::operator()...;
-    };
-    template<class... Ts>
-    Overload(Ts...) -> Overload<Ts...>;
-
-    export struct ItchView
-    {
-        uint64_t sequenceNumber;
-        std::span<std::byte const> payload;
-    };
+    using internal::Overloaded;
 
     export template<typename T>
     concept ItchSource = requires(T t) {
@@ -85,15 +32,6 @@ namespace alpdaq
         /// Force restarting must not block.
         t.forceRestart();
         noexcept(t.forceRestart());
-    };
-
-    export template<typename T>
-    concept SystemLogger = requires(T& t) {
-        /// For decoupling, we have a required function for every type of message that the system
-        /// needs to log.
-
-        // { t.tryEnqueueUnchecked(msg) } -> std::same_as<bool>;
-        { t.rotateSession() } -> std::same_as<void>;
     };
 
     template<SystemLogger Logger>
@@ -148,7 +86,13 @@ namespace alpdaq
         }
         ~System() { stop(); }
 
-        void stop() { running_.exchange(false); }
+        void stop()
+        {
+            if (running_.exchange(false))
+            {
+                config_.logger->logSystemStopped();
+            }
+        }
 
         std::expected<void, SystemError> run() noexcept
         {
@@ -156,6 +100,8 @@ namespace alpdaq
             {
                 return std::unexpected(SystemError::AlreadyRunning);
             }
+
+            config_.logger->logSystemStarted();
 
             while (running_.load(std::memory_order_relaxed))
             {
@@ -199,7 +145,9 @@ namespace alpdaq
 
                 if (result == WaitResult::FatalInconsistency)
                 {
+                    config_.logger->logFatalInconsistency();
                     clearOrderBooks();
+                    config_.logger->logForceRestart();
                     source_.forceRestart();
                     nextState = SystemState::Recovery;
                 }
@@ -212,18 +160,23 @@ namespace alpdaq
             auto handleEvent = [this, &nextState](SourceEvent const& event)
             {
                 std::visit(
-                    Overload {
+                    Overloaded {
                         [this, &nextState](GapRecovery const&)
-                        { nextState = SystemState::Recovery; },
-                        [this, &nextState](TotalRecovery const&)
-                        { nextState = SystemState::Recovery; },
-                        [this](SessionChanged const&)
                         {
-                            // A session change is permitted in this state.
+                            config_.logger->logGapRecovery();
+                            nextState = SystemState::Recovery;
                         },
+                        [this, &nextState](TotalRecovery const&)
+                        {
+                            config_.logger->logTotalRecovery();
+                            nextState = SystemState::Recovery;
+                        },
+                        [this](SessionChanged const& e)
+                        { config_.logger->logSessionChange(e.newSession); },
                         [this, &nextState](auto const&)
                         {
                             clearOrderBooks();
+                            config_.logger->logForceRestart();
                             source_.forceRestart();
                             nextState = SystemState::Recovery;
                         },
@@ -249,7 +202,9 @@ namespace alpdaq
 
                 if (result == StartupResult::FatalInconsistency) [[unlikely]]
                 {
+                    config_.logger->logFatalInconsistency();
                     clearOrderBooks();
+                    config_.logger->logForceRestart();
                     source_.forceRestart();
                     nextState = SystemState::Recovery;
                 }
@@ -297,21 +252,28 @@ namespace alpdaq
             auto handleEvent = [this, &nextState](SourceEvent const& event)
             {
                 std::visit(
-                    Overload {
-                        [&nextState](RecoveryComplete const&) { nextState = SystemState::Live; },
+                    Overloaded {
+                        [this, &nextState](RecoveryComplete const&)
+                        {
+                            config_.logger->logRecoveryComplete();
+                            nextState = SystemState::Live;
+                        },
                         [this, &nextState](GapRecovery const&)
                         {
+                            config_.logger->logGapRecovery();
                             gapRecovery();
                             nextState = SystemState::Recovery;
                         },
                         [this, &nextState](TotalRecovery const&)
                         {
+                            config_.logger->logTotalRecovery();
                             clearOrderBooks();
                             nextState = SystemState::Recovery;
                         },
                         [this, &nextState](auto const&)
                         {
                             clearOrderBooks();
+                            config_.logger->logForceRestart();
                             source_.forceRestart();
                             nextState = SystemState::Recovery;
                         },
@@ -340,7 +302,9 @@ namespace alpdaq
 
             if (result == ProcessResult::FatalInconsistency) [[unlikely]]
             {
+                config_.logger->logFatalInconsistency();
                 clearOrderBooks();
+                config_.logger->logForceRestart();
                 source_.forceRestart();
                 nextState = SystemState::Recovery;
             }
@@ -353,20 +317,23 @@ namespace alpdaq
         void normalEventHandler(SourceEvent const& event, SystemState& nextState) noexcept
         {
             std::visit(
-                Overload {
+                Overloaded {
                     [this, &nextState](GapRecovery const&)
                     {
+                        config_.logger->logGapRecovery();
                         gapRecovery();
                         nextState = SystemState::Recovery;
                     },
                     [this, &nextState](TotalRecovery const&)
                     {
+                        config_.logger->logTotalRecovery();
                         clearOrderBooks();
                         nextState = SystemState::Recovery;
                     },
                     [this, &nextState](auto const&)
                     {
                         clearOrderBooks();
+                        config_.logger->logForceRestart();
                         source_.forceRestart();
                         nextState = SystemState::Recovery;
                     },

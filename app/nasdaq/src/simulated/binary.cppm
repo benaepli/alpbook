@@ -6,7 +6,7 @@ module;
 #include <span>
 
 import alpbook.itch;
-import alpdaq.system;
+import alpdaq.system.state;
 
 export module alpdaq.simulated.binary;
 
@@ -57,7 +57,7 @@ namespace alpdaq::simulated
             auto& slot = *result;
             ItchView view {
                 .sequenceNumber = sequenceNumber_,
-                .payload = std::span<std::byte const>(slot.data),
+                .payload = std::span<std::byte const>(slot.get().data),
             };
             onData(view);
         }

@@ -7,6 +7,8 @@ target_sources(alpdaq
         FILE_SET CXX_MODULES FILES
         src/alpdaq.cppm
         src/config.cppm
+        src/internal.cppm
+        src/internal/overloaded.cppm
         src/logging.cppm
         src/logging/file.cppm
         src/logging/logger.cppm
@@ -16,6 +18,7 @@ target_sources(alpdaq
         src/simulated.cppm
         src/simulated/binary.cppm
         src/system.cppm
+        src/system/state.cppm
 )
 
 target_link_libraries(alpdaq
