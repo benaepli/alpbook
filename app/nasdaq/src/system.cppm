@@ -19,7 +19,7 @@ export module alpdaq.system;
 
 namespace alpdaq
 {
-    enum class SystemState
+    enum class SystemState : uint8_t
     {
         /// Waiting to process the first message.
         Waiting,
@@ -28,57 +28,37 @@ namespace alpdaq
         /// events.
         Startup,
 
-        Halt,
+        Live,
 
         Recovery,
-        Live,
 
         EndOfDay,
     };
 
-    enum class SourceError
+    export enum class SourceEvent : uint8_t
     {
+        /// Gap recovery occurs if we don't need to restart from sequence number 1.
+        GapRecovery,
+        /// Total recovery indicates that all books should be cleared.
+        TotalRecovery,
+        RecoveryComplete,
+        FatalError,
     };
 
-    /// This struct represents the underlying ITCH/MoldUDP64 message.
-    /// Invariant: an ITCH message must have at least 20 bytes. We do not check this
-    /// in the associated helper functions.
-    ///
-    /// In its header, it contains: 10 bytes for the session, 8 bytes for the sequence number,
-    /// and 2 bytes for the message count.
-    export struct MoldItch
+    struct ItchView
     {
-        std::span<std::byte> message;
-
-        bool valid() const noexcept { return message.size() >= 20; }
-
-        std::array<uint8_t, 10> session() const noexcept
-        {
-            std::array<uint8_t, 10> s;
-            std::memcpy(s.data(), message.data(), 10);
-            return s;
-        }
-
-        uint64_t sequenceNumber() const noexcept
-        {
-            uint64_t val;
-            std::memcpy(&val, message.data() + 10, sizeof(val));
-            return std::byteswap(val);
-        }
-
-        uint16_t messageCount() const noexcept
-        {
-            uint16_t val;
-            std::memcpy(&val, message.data() + 18, sizeof(val));
-            return std::byteswap(val);
-        }
+        uint64_t sequenceNumber;
+        std::span<std::byte const> payload;
     };
 
-    /// A source must return a sequence of bytes corresponding to an ITCH batch.
-    export template<typename T, bool B>
+    export template<typename T>
     concept ItchSource = requires(T t) {
-        { t.poll() } -> std::same_as<std::expected<MoldItch, SourceError>>;
+        t.poll(std::declval<void (*)(ItchView)>(), std::declval<void (*)(SourceEvent)>());
         noexcept(t.poll());
+
+        /// Force restarting must not block.
+        t.forceRestart();
+        noexcept(t.forceRestart());
     };
 
     template<logging::OutputSink O>
@@ -92,11 +72,18 @@ namespace alpdaq
     {
         constexpr static auto DISPATCH_ARRAY_SIZE = std::numeric_limits<uint16_t>::max();
 
-        uint64_t sessionId;
+        uint64_t session;
 
         /// The last processed sequence number.
         uint64_t sequenceNumber = 0;
         absl::flat_hash_map<alpbook::itch::StockTicker, uint16_t> tickers;
+    };
+
+    enum class ProcessResult : uint8_t
+    {
+        Ok,
+        FatalInconsistency,
+        EndOfDayEvent,
     };
 
     enum class SystemError
@@ -104,8 +91,8 @@ namespace alpdaq
         AlreadyRunning,
     };
 
-    export template<typename Source, logging::OutputSink LogOutput, bool B>
-        requires ItchSource<Source, B>
+    export template<typename Source, logging::OutputSink LogOutput>
+        requires ItchSource<Source>
     class System
     {
       public:
@@ -125,28 +112,91 @@ namespace alpdaq
                 return std::unexpected(SystemError::AlreadyRunning);
             }
 
-            runNormal();
+            while (running_.load(std::memory_order_relaxed))
+            {
+                switch (state_)
+                {
+                    case SystemState::Waiting:
+                        state_ = runWaiting();
+                        break;
+                    case SystemState::Startup:
+                    {
+                        state_ = runStartup();
+                        break;
+                    }
+                    case SystemState::Live:
+                    {
+                        state_ = runLive();
+                        break;
+                    }
+                    case SystemState::Recovery:
+                    {
+                        state_ = runRecovery();
+                        break;
+                    }
+                    case SystemState::EndOfDay:
+                    {
+                        state_ = runEndOfDay();
+                        break;
+                    }
+                }
+            }
             return {};
         }
 
       private:
-        void runNormal() noexcept
+        SystemState runWaiting() noexcept;
+        SystemState runStartup() noexcept;
+        SystemState runLive() noexcept
         {
-            while (running_.load(std::memory_order_relaxed))
+            SystemState nextState = SystemState::Live;
+            auto handleData = [this, &nextState](ItchView view)
             {
-                auto result = source_.poll();
-                if (!result)
-                {
-                    continue;
-                }
+                auto result = processLiveMessage(view.payload);
 
-                auto& mold = *result;
-                if (!mold.valid())
+                if (result == ProcessResult::FatalInconsistency) [[unlikely]]
                 {
-                    continue;
+                    clearOrderBooks();
+                    source_.forceRestart();
+                    nextState = SystemState::Recovery;
                 }
+                else if (result == ProcessResult::EndOfDayEvent) [[unlikely]]
+                {
+                    nextState = SystemState::EndOfDay;
+                }
+            };
+
+            auto handleEvent = [this, &nextState](SourceEvent event)
+            {
+                if (event == SourceEvent::GapRecovery)
+                {
+                    gapRecovery();
+                    nextState = SystemState::Recovery;
+                }
+                else if (event == SourceEvent::TotalRecovery)
+                {
+                    clearOrderBooks();
+                    nextState = SystemState::Recovery;
+                }
+                else
+                {
+                    clearOrderBooks();
+                    source_.forceRestart();
+                    nextState = SystemState::Recovery;
+                }
+            };
+
+            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Live)
+            {
+                source_.poll(handleData, handleEvent);
             }
         }
+        SystemState runRecovery() noexcept;
+        SystemState runEndOfDay() noexcept;
+
+        ProcessResult processLiveMessage(std::span<std::byte const> payload) noexcept;
+        void gapRecovery() noexcept;
+        void clearOrderBooks() noexcept;
 
         std::atomic<bool> running_ {false};
 
