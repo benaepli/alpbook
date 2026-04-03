@@ -45,7 +45,7 @@ namespace alpdaq::logging
     class Logger
     {
       public:
-        explicit Logger(size_t bufferSize, O&& output)
+        explicit Logger(size_t bufferSize, O output)
             : queue_(bufferSize)
             , output_(std::move(output))
         {

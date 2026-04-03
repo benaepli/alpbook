@@ -7,6 +7,7 @@ module;
 #include <expected>
 #include <memory>
 #include <span>
+#include <variant>
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
@@ -35,15 +36,40 @@ namespace alpdaq
         EndOfDay,
     };
 
-    export enum class SourceEvent : uint8_t
+    using SessionId = std::array<uint8_t, 10>;
+
+    struct SessionChanged
     {
-        /// Gap recovery occurs if we don't need to restart from sequence number 1.
-        GapRecovery,
-        /// Total recovery indicates that all books should be cleared.
-        TotalRecovery,
-        RecoveryComplete,
-        FatalError,
+        SessionId newSession;
     };
+
+    /// Gap recovery occurs if we don't need to restart from sequence number 1.
+    export struct GapRecovery
+    {
+    };
+    /// Total recovery indicates that all books should be cleared.
+    export struct TotalRecovery
+    {
+    };
+    export struct RecoveryComplete
+    {
+    };
+    export struct FatalError
+    {
+    };
+
+    /// If a given message produces a source event, the source event should be processed
+    /// before any data corresponding to that message.
+    export using SourceEvent =
+        std::variant<SessionChanged, GapRecovery, TotalRecovery, RecoveryComplete, FatalError>;
+
+    template<typename... Ts>
+    struct Overload : Ts...
+    {
+        using Ts::operator()...;
+    };
+    template<class... Ts>
+    Overload(Ts...) -> Overload<Ts...>;
 
     struct ItchView
     {
@@ -53,7 +79,7 @@ namespace alpdaq
 
     export template<typename T>
     concept ItchSource = requires(T t) {
-        t.poll(std::declval<void (*)(ItchView)>(), std::declval<void (*)(SourceEvent)>());
+        t.poll([](ItchView const&) {}, [](SourceEvent const&) {});
         noexcept(t.poll());
 
         /// Force restarting must not block.
@@ -72,11 +98,21 @@ namespace alpdaq
     {
         constexpr static auto DISPATCH_ARRAY_SIZE = std::numeric_limits<uint16_t>::max();
 
-        uint64_t session;
-
         /// The last processed sequence number.
         uint64_t sequenceNumber = 0;
         absl::flat_hash_map<alpbook::itch::StockTicker, uint16_t> tickers;
+    };
+
+    enum class WaitResult : uint8_t
+    {
+        FatalInconsistency,
+        StartupEvent,
+    };
+
+    enum class StartupResult : uint8_t
+    {
+        FatalInconsistency,
+        LiveEvent,
     };
 
     enum class ProcessResult : uint8_t
@@ -96,9 +132,9 @@ namespace alpdaq
     class System
     {
       public:
-        explicit System(Source&& source, SystemConfig<LogOutput> config) noexcept
-            : source_(source)
-            , config_(config)
+        explicit System(Source source, SystemConfig<LogOutput> config) noexcept
+            : source_(std::move(source))
+            , config_(std::move(config))
         {
         }
         ~System() { stop(); }
@@ -145,55 +181,192 @@ namespace alpdaq
         }
 
       private:
-        SystemState runWaiting() noexcept;
-        SystemState runStartup() noexcept;
-        SystemState runLive() noexcept
+        SystemState runWaiting() noexcept
         {
-            SystemState nextState = SystemState::Live;
-            auto handleData = [this, &nextState](ItchView view)
+            SystemState nextState = SystemState::Waiting;
+            auto handleData = [this, &nextState](ItchView const& view)
             {
-                auto result = processLiveMessage(view.payload);
+                auto result = processWaitingMessage(view.payload);
 
-                if (result == ProcessResult::FatalInconsistency) [[unlikely]]
+                if (result == WaitResult::FatalInconsistency)
                 {
                     clearOrderBooks();
                     source_.forceRestart();
                     nextState = SystemState::Recovery;
                 }
-                else if (result == ProcessResult::EndOfDayEvent) [[unlikely]]
+                else if (result == WaitResult::StartupEvent)
                 {
-                    nextState = SystemState::EndOfDay;
+                    nextState = SystemState::Startup;
                 }
             };
 
-            auto handleEvent = [this, &nextState](SourceEvent event)
+            auto handleEvent = [this, &nextState](SourceEvent const& event)
             {
-                if (event == SourceEvent::GapRecovery)
-                {
-                    gapRecovery();
-                    nextState = SystemState::Recovery;
-                }
-                else if (event == SourceEvent::TotalRecovery)
-                {
-                    clearOrderBooks();
-                    nextState = SystemState::Recovery;
-                }
-                else
-                {
-                    clearOrderBooks();
-                    source_.forceRestart();
-                    nextState = SystemState::Recovery;
-                }
+                std::visit(
+                    Overload {
+                        [this, &nextState](GapRecovery const&)
+                        { nextState = SystemState::Recovery; },
+                        [this, &nextState](TotalRecovery const&)
+                        { nextState = SystemState::Recovery; },
+                        [this](SessionChanged const&)
+                        {
+                            // A session change is permitted in this state.
+                        },
+                        [this, &nextState](auto const&)
+                        {
+                            clearOrderBooks();
+                            source_.forceRestart();
+                            nextState = SystemState::Recovery;
+                        },
+                    },
+                    event);
             };
 
-            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Live)
+            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Waiting)
+                [[likely]]
             {
                 source_.poll(handleData, handleEvent);
             }
-        }
-        SystemState runRecovery() noexcept;
-        SystemState runEndOfDay() noexcept;
 
+            return nextState;
+        }
+
+        SystemState runStartup() noexcept
+        {
+            SystemState nextState = SystemState::Startup;
+            auto handleData = [this, &nextState](ItchView const& view)
+            {
+                auto result = processStartupMessage(view.payload);
+
+                if (result == StartupResult::FatalInconsistency) [[unlikely]]
+                {
+                    clearOrderBooks();
+                    source_.forceRestart();
+                    nextState = SystemState::Recovery;
+                }
+                else if (result == StartupResult::LiveEvent) [[unlikely]]
+                {
+                    nextState = SystemState::Live;
+                }
+            };
+
+            auto handleEvent = [this, &nextState](SourceEvent const& event)
+            { normalEventHandler(event, nextState); };
+
+            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Startup)
+                [[likely]]
+            {
+                source_.poll(handleData, handleEvent);
+            }
+
+            return nextState;
+        }
+
+        SystemState runLive() noexcept
+        {
+            SystemState nextState = SystemState::Live;
+            auto handleData = [this, &nextState](ItchView const& view)
+            { normalDataHandler(view, nextState); };
+
+            auto handleEvent = [this, &nextState](SourceEvent const& event)
+            { normalEventHandler(event, nextState); };
+
+            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Live)
+                [[likely]]
+            {
+                source_.poll(handleData, handleEvent);
+            }
+            return nextState;
+        }
+
+        SystemState runRecovery() noexcept
+        {
+            SystemState nextState = SystemState::Recovery;
+            auto handleData = [this, &nextState](ItchView const& view)
+            { normalDataHandler(view, nextState); };
+
+            auto handleEvent = [this, &nextState](SourceEvent const& event)
+            {
+                std::visit(
+                    Overload {
+                        [&nextState](RecoveryComplete const&)
+                        { nextState = SystemState::Live; },
+                        [this, &nextState](GapRecovery const&)
+                        {
+                            gapRecovery();
+                            nextState = SystemState::Recovery;
+                        },
+                        [this, &nextState](TotalRecovery const&)
+                        {
+                            clearOrderBooks();
+                            nextState = SystemState::Recovery;
+                        },
+                        [this, &nextState](auto const&)
+                        {
+                            clearOrderBooks();
+                            source_.forceRestart();
+                            nextState = SystemState::Recovery;
+                        },
+                    },
+                    event);
+            };
+
+            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Recovery)
+                [[likely]]
+            {
+                source_.poll(handleData, handleEvent);
+            }
+            return nextState;
+        }
+
+        SystemState runEndOfDay() noexcept
+        {
+            clearOrderBooks();
+            return SystemState::Waiting;
+        }
+
+        void normalDataHandler(ItchView const& view, SystemState& nextState) noexcept
+        {
+            auto result = processLiveMessage(view.payload);
+
+            if (result == ProcessResult::FatalInconsistency) [[unlikely]]
+            {
+                clearOrderBooks();
+                source_.forceRestart();
+                nextState = SystemState::Recovery;
+            }
+            else if (result == ProcessResult::EndOfDayEvent) [[unlikely]]
+            {
+                nextState = SystemState::EndOfDay;
+            }
+        }
+
+        void normalEventHandler(SourceEvent const& event, SystemState& nextState) noexcept
+        {
+            std::visit(
+                Overload {
+                    [this, &nextState](GapRecovery const&)
+                    {
+                        gapRecovery();
+                        nextState = SystemState::Recovery;
+                    },
+                    [this, &nextState](TotalRecovery const&)
+                    {
+                        clearOrderBooks();
+                        nextState = SystemState::Recovery;
+                    },
+                    [this, &nextState](auto const&)
+                    {
+                        clearOrderBooks();
+                        source_.forceRestart();
+                        nextState = SystemState::Recovery;
+                    },
+                },
+                event);
+        }
+
+        WaitResult processWaitingMessage(std::span<std::byte const> payload) noexcept;
+        StartupResult processStartupMessage(std::span<std::byte const> payload) noexcept;
         ProcessResult processLiveMessage(std::span<std::byte const> payload) noexcept;
         void gapRecovery() noexcept;
         void clearOrderBooks() noexcept;

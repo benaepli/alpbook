@@ -78,4 +78,9 @@ namespace alpbook::itch
     {
         TradingState state;
     };
+
+    export enum class ParseError : uint8_t
+    {
+        InsufficientData,
+    };
 }  // namespace alpbook::itch

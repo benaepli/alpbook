@@ -2,10 +2,13 @@ module;
 
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <expected>
 #include <memory>
 #include <optional>
+#include <span>
 #include <variant>
 #include <vector>
 
@@ -21,7 +24,7 @@ export import :listener;
 
 namespace alpbook::itch
 {
-    using ItchBytes = std::array<uint8_t, 55>;
+    using ItchBytes = std::array<std::byte, 55>;
 
     export template<bool Benchmark = false>
     struct alignas(std::hardware_destructive_interference_size) ItchSlot
@@ -31,30 +34,35 @@ namespace alpbook::itch
             dispatchTimestamp;
     };
 
+    export inline constexpr size_t CLASSIFY_MESSAGE_SIZE = 1;
+    export inline constexpr size_t PARSE_ID_SIZE = 3;
+    export inline constexpr size_t SYSTEM_EVENT_MESSAGE_SIZE = 12;
+    export inline constexpr size_t STOCK_TRADING_ACTION_MESSAGE_SIZE = 20;
+
     template<typename T>
         requires std::is_integral_v<T>
-    T parseField(ItchBytes const& msg, size_t offset)
+    T parseField(std::span<std::byte const> msg, size_t offset)
     {
         T val;
         std::memcpy(&val, msg.data() + offset, sizeof(T));
         return std::byteswap(val);
     }
 
-    export uint16_t parseID(ItchBytes const& msg)
+    export uint16_t parseID(std::span<std::byte const> msg)
     {
         return parseField<uint16_t>(msg, 1);
     };
 
-    uint64_t parseTimestamp(ItchBytes const& msg)
+    uint64_t parseTimestamp(std::span<std::byte const> msg)
     {
         uint64_t const high = parseField<uint16_t>(msg, 5);
         uint64_t const low = parseField<uint32_t>(msg, 7);
         return (high << 32) | low;
     }
 
-    export ALPBOOK_INLINE MessageClassification classifyMessage(ItchBytes const& msg)
+    export ALPBOOK_INLINE MessageClassification classifyMessage(std::span<std::byte const> msg)
     {
-        char const msgType = msg[0];
+        char const msgType = std::to_integer<char>(msg[0]);
         [[likely]] if (msgType == 'A' || msgType == 'F' || msgType == 'E' || msgType == 'C'
                        || msgType == 'X' || msgType == 'D' || msgType == 'U')
         {
@@ -77,9 +85,10 @@ namespace alpbook::itch
 
     /// Parse an ITCH system event message and dispatch to the listener.
     export template<SystemEventListener L>
-    ALPBOOK_INLINE void parseSystemEventMessage(ItchBytes bytes, L& listener) noexcept
+    ALPBOOK_INLINE void parseSystemEventMessage(std::span<std::byte const> bytes,
+                                                L& listener) noexcept
     {
-        char const eventCode = static_cast<char>(bytes[11]);
+        char const eventCode = std::to_integer<char>(bytes[11]);
         switch (eventCode)
         {
             case 'O':
@@ -107,14 +116,14 @@ namespace alpbook::itch
 
     /// Parse an ITCH stock trading action message into the struct representation.
     export ALPBOOK_INLINE std::optional<StockTradingAction> parseStockTradingActionMessage(
-        ItchBytes const& bytes) noexcept
+        std::span<std::byte const> bytes) noexcept
     {
-        if (bytes[0] != 'H')
+        if (std::to_integer<char>(bytes[0]) != 'H')
         {
             return std::nullopt;
         }
 
-        char const stateCode = static_cast<char>(bytes[19]);
+        char const stateCode = std::to_integer<char>(bytes[19]);
         switch (stateCode)
         {
             case 'T':
@@ -144,18 +153,24 @@ namespace alpbook::itch
     /// Order-related messages are the ones directly consumed by order books
     /// and should be parsed after you know the correct locate ID.
     export template<OrderListener L>
-    ALPBOOK_INLINE void parseOrderMessage(ItchBytes bytes, L& listener) noexcept
+    ALPBOOK_INLINE std::expected<void, ParseError> parseOrderMessage(
+        std::span<std::byte const> bytes, L& listener) noexcept
     {
-        char const msgType = bytes[0];
+        char const msgType = std::to_integer<char>(bytes[0]);
 
         switch (msgType)
         {
             case 'A':
             case 'F':
             {
+                if (bytes.size() < 36) [[unlikely]]
+                {
+                    return std::unexpected(ParseError::InsufficientData);
+                }
+
                 auto const timestamp = parseTimestamp(bytes);
                 auto const id = parseField<uint64_t>(bytes, 11);
-                auto const side = static_cast<char>(bytes[19]);
+                auto const side = std::to_integer<char>(bytes[19]);
                 auto const shares = parseField<uint32_t>(bytes, 20);
                 auto const price = parseField<uint32_t>(bytes, 32);
 
@@ -170,6 +185,11 @@ namespace alpbook::itch
             case 'E':
             case 'C':
             {
+                if (bytes.size() < 23) [[unlikely]]
+                {
+                    return std::unexpected(ParseError::InsufficientData);
+                }
+
                 auto const id = parseField<uint64_t>(bytes, 11);
                 auto const shares = parseField<uint32_t>(bytes, 19);
 
@@ -179,6 +199,11 @@ namespace alpbook::itch
 
             case 'X':
             {
+                if (bytes.size() < 23) [[unlikely]]
+                {
+                    return std::unexpected(ParseError::InsufficientData);
+                }
+
                 auto const id = parseField<uint64_t>(bytes, 11);
                 auto const shares = parseField<uint32_t>(bytes, 19);
 
@@ -188,6 +213,11 @@ namespace alpbook::itch
 
             case 'D':
             {
+                if (bytes.size() < 19) [[unlikely]]
+                {
+                    return std::unexpected(ParseError::InsufficientData);
+                }
+
                 auto const id = parseField<uint64_t>(bytes, 11);
 
                 listener.cancel(CancelOrder {.id = id});
@@ -196,6 +226,11 @@ namespace alpbook::itch
 
             case 'U':
             {
+                if (bytes.size() < 35) [[unlikely]]
+                {
+                    return std::unexpected(ParseError::InsufficientData);
+                }
+
                 auto const timestamp = parseTimestamp(bytes);
                 auto const oldId = parseField<uint64_t>(bytes, 11);
                 auto const newId = parseField<uint64_t>(bytes, 19);
@@ -213,5 +248,6 @@ namespace alpbook::itch
             default:
                 break;
         }
+        return {};
     }
 }  // namespace alpbook::itch
