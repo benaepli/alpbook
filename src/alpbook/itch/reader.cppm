@@ -8,9 +8,9 @@ module;
 
 #include "zlib.h"
 
-import alpbook.itch.parsing;
-
 export module alpbook.itch.reader;
+
+import alpbook.itch.parsing;
 
 namespace alpbook::itch
 {

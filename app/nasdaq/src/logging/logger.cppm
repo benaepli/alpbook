@@ -6,10 +6,10 @@ module;
 
 #include "readerwriterqueue.h"
 
+export module alpdaq.logging.logger;
+
 import alpdaq.logging.messages;
 import alpbook.internal.backoff;
-
-export module alpdaq.logging.logger;
 
 namespace alpdaq::logging
 {

@@ -9,9 +9,9 @@ module;
 
 #include <toml++/toml.hpp>
 
-import alpbook.itch;
-
 export module alpdaq.config;
+
+import alpbook.itch;
 
 namespace alpdaq::config
 {

@@ -7,12 +7,12 @@ module;
 
 #include <tscns.h>
 
+export module alpbook_latency.sink;
+
 import alpbook;
 import alpbook.sink.nasdaq;
 import alpbook.strategy;
 import alpbook_latency.strategy;
-
-export module alpbook_latency.sink;
 
 namespace alpbook_latency
 {

@@ -1,6 +1,5 @@
 module;
 
-import alpbook.common;
 
 #include <concepts>
 #include <cstdint>
@@ -8,6 +7,8 @@ import alpbook.common;
 #include <type_traits>
 
 export module alpbook.book.core;
+
+import alpbook.common;
 
 namespace alpbook
 {

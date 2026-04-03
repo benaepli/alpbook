@@ -5,10 +5,10 @@ module;
 #include <filesystem>
 #include <span>
 
+export module alpdaq.simulated.binary;
+
 import alpbook.itch;
 import alpdaq.system.state;
-
-export module alpdaq.simulated.binary;
 
 namespace alpdaq::simulated
 {

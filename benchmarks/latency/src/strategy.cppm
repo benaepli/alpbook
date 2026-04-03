@@ -7,9 +7,9 @@ module;
 
 #include <tscns.h>
 
-import alpbook;
-
 export module alpbook_latency.strategy;
+
+import alpbook;
 
 namespace alpbook_latency
 {

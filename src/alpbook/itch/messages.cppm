@@ -3,9 +3,9 @@ module;
 #include <array>
 #include <cstdint>
 
-import alpbook.book.nasdaq;
-
 export module alpbook.itch.messages;
+
+import alpbook.book.nasdaq;
 
 namespace alpbook::itch
 {

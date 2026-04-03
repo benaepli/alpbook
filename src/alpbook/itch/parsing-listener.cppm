@@ -2,10 +2,10 @@ module;
 
 #include <concepts>
 
+export module alpbook.itch.parsing:listener;
+
 import alpbook.book.nasdaq;
 import alpbook.itch.messages;
-
-export module alpbook.itch.parsing:listener;
 
 namespace alpbook::itch
 {

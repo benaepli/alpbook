@@ -4,10 +4,10 @@ module;
 #include <cstdint>
 #include <vector>
 
+export module alpdaq.system.container;
+
 import alpbook.book.nasdaq;
 import alpbook.itch.messages;
-
-export module alpdaq.system.container;
 
 namespace alpdaq::system
 {

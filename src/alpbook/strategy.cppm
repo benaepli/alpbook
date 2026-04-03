@@ -3,10 +3,10 @@ module;
 #include <concepts>
 #include <cstdint>
 
+export module alpbook.strategy;
+
 import alpbook.common;
 import alpbook.book.core;
-
-export module alpbook.strategy;
 
 namespace alpbook::strategy
 {

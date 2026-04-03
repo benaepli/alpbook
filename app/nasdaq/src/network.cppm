@@ -1,6 +1,5 @@
 module;
 
-import alpbook.itch;
 
 #include <array>
 #include <bit>
@@ -9,6 +8,8 @@ import alpbook.itch;
 #include <span>
 
 export module alpdaq.network;
+
+import alpbook.itch;
 
 namespace alpdaq::network
 {

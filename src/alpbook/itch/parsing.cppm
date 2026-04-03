@@ -14,11 +14,11 @@ module;
 
 #include "alpbook/internal/hints.hpp"
 
+export module alpbook.itch.parsing;
+
 import alpbook.book.nasdaq;
 import alpbook.common;
 import alpbook.itch.messages;
-
-export module alpbook.itch.parsing;
 
 export import :listener;
 

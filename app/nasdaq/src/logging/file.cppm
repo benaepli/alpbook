@@ -9,12 +9,12 @@ module;
 #include <string_view>
 #include <variant>
 
+export module alpdaq.logging.file;
+
 import alpdaq.internal;
 import alpdaq.logging.logger;
 import alpdaq.logging.messages;
 import alpdaq.system.state;
-
-export module alpdaq.logging.file;
 
 namespace alpdaq::logging
 {
