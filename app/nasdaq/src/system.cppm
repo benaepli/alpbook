@@ -36,9 +36,9 @@ namespace alpdaq
         EndOfDay,
     };
 
-    using SessionId = std::array<uint8_t, 10>;
+    export using SessionId = std::array<uint8_t, 10>;
 
-    struct SessionChanged
+    export struct SessionChanged
     {
         SessionId newSession;
     };
@@ -71,11 +71,11 @@ namespace alpdaq
     template<class... Ts>
     Overload(Ts...) -> Overload<Ts...>;
 
-    struct ItchView
+    export struct ItchView
     {
         uint64_t sequenceNumber;
         std::span<std::byte const> payload;
-    };
+    }; 
 
     export template<typename T>
     concept ItchSource = requires(T t) {
@@ -289,8 +289,7 @@ namespace alpdaq
             {
                 std::visit(
                     Overload {
-                        [&nextState](RecoveryComplete const&)
-                        { nextState = SystemState::Live; },
+                        [&nextState](RecoveryComplete const&) { nextState = SystemState::Live; },
                         [this, &nextState](GapRecovery const&)
                         {
                             gapRecovery();

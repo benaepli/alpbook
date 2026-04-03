@@ -12,6 +12,8 @@ target_sources(alpdaq
         src/logging/messages.cppm
         src/network.cppm
         src/placement.cppm
+        src/simulated.cppm
+        src/simulated/binary.cppm
         src/system.cppm
 )
 
