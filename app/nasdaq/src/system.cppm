@@ -11,18 +11,19 @@ module;
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
-#include <absl/container/flat_hash_set.h>
+
+export module alpdaq.system;
 
 import alpdaq.internal;
 import alpdaq.logging;
 import alpdaq.system.state;
 import alpbook.itch;
-
-export module alpdaq.system;
+import alpdaq.system.container;
 
 namespace alpdaq
 {
     using internal::Overloaded;
+    using namespace alpbook;
 
     export template<typename T>
     concept ItchSource = requires(T t) {
@@ -38,7 +39,7 @@ namespace alpdaq
     struct SystemConfig
     {
         std::shared_ptr<Logger> logger;
-        std::vector<alpbook::itch::StockTicker> stocks;
+        std::vector<itch::StockTicker> stocks;
     };
 
     struct DayState
@@ -47,41 +48,43 @@ namespace alpdaq
 
         /// The last processed sequence number.
         uint64_t sequenceNumber = 0;
-        absl::flat_hash_map<alpbook::itch::StockTicker, uint16_t> tickers;
+        absl::flat_hash_map<itch::StockTicker, uint16_t> tickers;
     };
 
     enum class WaitResult : uint8_t
     {
-        FatalInconsistency,
+        Inconsistency,
         StartupEvent,
     };
 
     enum class StartupResult : uint8_t
     {
-        FatalInconsistency,
+        Inconsistency,
         LiveEvent,
     };
 
     enum class ProcessResult : uint8_t
     {
         Ok,
-        FatalInconsistency,
+        Inconsistency,
         EndOfDayEvent,
     };
 
     enum class SystemError
     {
         AlreadyRunning,
+        FatalError,
     };
 
-    export template<typename Source, SystemLogger Logger>
-        requires ItchSource<Source>
+    export template<typename Source, SystemLogger Logger, typename Container>
+        requires ItchSource<Source> && system::StrategyContainer<Container>
     class System
     {
       public:
-        explicit System(Source source, SystemConfig<Logger> config) noexcept
+        explicit System(Source source, SystemConfig<Logger> config, Container container) noexcept
             : source_(std::move(source))
             , config_(std::move(config))
+            , container_(std::move(container))
         {
         }
         ~System() { stop(); }
@@ -102,6 +105,7 @@ namespace alpdaq
             }
 
             config_.logger->logSystemStarted();
+            container_.init(config_.stocks);
 
             while (running_.load(std::memory_order_relaxed))
             {
@@ -130,6 +134,11 @@ namespace alpdaq
                         state_ = runEndOfDay();
                         break;
                     }
+                    case SystemState::Terminate:
+                    {
+                        config_.logger->rotateSession();
+                        return std::unexpected(SystemError::FatalError);
+                    }
                 }
             }
             return {};
@@ -143,9 +152,9 @@ namespace alpdaq
             {
                 auto result = processWaitingMessage(view.payload);
 
-                if (result == WaitResult::FatalInconsistency)
+                if (result == WaitResult::Inconsistency)
                 {
-                    config_.logger->logFatalInconsistency();
+                    config_.logger->logInconsistency();
                     clearOrderBooks();
                     config_.logger->logForceRestart();
                     source_.forceRestart();
@@ -173,6 +182,11 @@ namespace alpdaq
                         },
                         [this](SessionChanged const& e)
                         { config_.logger->logSessionChange(e.newSession); },
+                        [this, &nextState](FatalError const&)
+                        {
+                            clearOrderBooks();
+                            nextState = SystemState::Terminate;
+                        },
                         [this, &nextState](auto const&)
                         {
                             clearOrderBooks();
@@ -200,9 +214,9 @@ namespace alpdaq
             {
                 auto result = processStartupMessage(view.payload);
 
-                if (result == StartupResult::FatalInconsistency) [[unlikely]]
+                if (result == StartupResult::Inconsistency) [[unlikely]]
                 {
-                    config_.logger->logFatalInconsistency();
+                    config_.logger->logInconsistency();
                     clearOrderBooks();
                     config_.logger->logForceRestart();
                     source_.forceRestart();
@@ -270,6 +284,11 @@ namespace alpdaq
                             clearOrderBooks();
                             nextState = SystemState::Recovery;
                         },
+                        [this, &nextState](FatalError const&)
+                        {
+                            clearOrderBooks();
+                            nextState = SystemState::Terminate;
+                        },
                         [this, &nextState](auto const&)
                         {
                             clearOrderBooks();
@@ -292,7 +311,7 @@ namespace alpdaq
         SystemState runEndOfDay() noexcept
         {
             config_.logger->rotateSession();
-            clearOrderBooks();
+            container_.clearAll();
             return SystemState::Waiting;
         }
 
@@ -300,9 +319,9 @@ namespace alpdaq
         {
             auto result = processLiveMessage(view.payload);
 
-            if (result == ProcessResult::FatalInconsistency) [[unlikely]]
+            if (result == ProcessResult::Inconsistency) [[unlikely]]
             {
-                config_.logger->logFatalInconsistency();
+                config_.logger->logInconsistency();
                 clearOrderBooks();
                 config_.logger->logForceRestart();
                 source_.forceRestart();
@@ -327,8 +346,13 @@ namespace alpdaq
                     [this, &nextState](TotalRecovery const&)
                     {
                         config_.logger->logTotalRecovery();
-                        clearOrderBooks();
+                        container_.clearAll();
                         nextState = SystemState::Recovery;
+                    },
+                    [this, &nextState](FatalError const&)
+                    {
+                        clearOrderBooks();
+                        nextState = SystemState::Terminate;
                     },
                     [this, &nextState](auto const&)
                     {
@@ -341,11 +365,106 @@ namespace alpdaq
                 event);
         }
 
-        WaitResult processWaitingMessage(std::span<std::byte const> payload) noexcept;
-        StartupResult processStartupMessage(std::span<std::byte const> payload) noexcept;
+        WaitResult processWaitingMessage(std::span<std::byte const> payload) noexcept
+        {
+            if (payload.size() <= itch::SYSTEM_EVENT_MESSAGE_SIZE) [[unlikely]]
+            {
+                return WaitResult::Inconsistency;
+            }
+
+            itch::MessageClassification const classification = itch::classifyMessage(payload);
+            switch (classification)
+            {
+                case itch::MessageClassification::Order:
+                case itch::MessageClassification::StockDirectory:
+                case itch::MessageClassification::StockTradingAction:
+                case itch::MessageClassification::Ignored:
+                {
+                    return WaitResult::Inconsistency;
+                }
+                case itch::MessageClassification::SystemEvent:
+                {
+                    break;
+                }
+            }
+
+            WaitResult result = WaitResult::Inconsistency;
+            struct Listener
+            {
+                WaitResult& result;
+                void startOfMessages(itch::events::StartOfMessages) const
+                {
+                    result = WaitResult::StartupEvent;
+                }
+                void startOfSystem(itch::events::StartOfSystem) const
+                {
+                    result = WaitResult::Inconsistency;
+                }
+                void startOfMarket(itch::events::StartOfMarket) const
+                {
+                    result = WaitResult::Inconsistency;
+                }
+                void endOfMarket(itch::events::EndOfMarket) const
+                {
+                    result = WaitResult::Inconsistency;
+                }
+                void endOfSystem(itch::events::EndOfSystem) const
+                {
+                    result = WaitResult::Inconsistency;
+                }
+                void endOfMessages(itch::events::EndOfMessages) const
+                {
+                    result = WaitResult::Inconsistency;
+                }
+            };
+
+            Listener listener {result};
+            itch::parseSystemEventMessage<Listener>(payload, listener);
+            return result;
+        }
+        StartupResult processStartupMessage(std::span<std::byte const> payload) noexcept
+        {
+            if (payload.size() <= itch::SYSTEM_EVENT_MESSAGE_SIZE) [[unlikely]]
+            {
+                return StartupResult::Inconsistency;
+            }
+
+            itch::MessageClassification const classification = itch::classifyMessage(payload);
+            switch (classification)
+            {
+                case itch::MessageClassification::Order:
+                {
+                    return StartupResult::Inconsistency;
+                }
+                case itch::MessageClassification::StockDirectory:
+                {
+                    // TODO: parse stock directory, register with container
+                    break;
+                }
+                case itch::MessageClassification::StockTradingAction:
+                {
+                    // TODO: parse trading action, dispatch to container
+                    break;
+                }
+                case itch::MessageClassification::SystemEvent:
+                {
+                    // TODO: parse system event, startOfSystem → LiveEvent
+                    break;
+                }
+                case itch::MessageClassification::Ignored:
+                {
+                    break;
+                }
+            }
+
+            return StartupResult::Inconsistency;
+        }
         ProcessResult processLiveMessage(std::span<std::byte const> payload) noexcept;
-        void gapRecovery() noexcept;
-        void clearOrderBooks() noexcept;
+        static void gapRecovery() noexcept
+        {
+            // For now: no action needed
+        }
+        void clearOrderBooks() noexcept { container_.clearAll(); }
 
         std::atomic<bool> running_ {false};
 
@@ -354,7 +473,7 @@ namespace alpdaq
         SystemConfig<Logger> config_;
         SystemState state_ = SystemState::Waiting;
 
-        absl::flat_hash_set<alpbook::itch::StockTicker> trackedStocks_;
+        Container container_;
         std::optional<DayState> dayState_ = std::nullopt;
     };
 }  // namespace alpdaq

@@ -26,20 +26,19 @@ namespace alpbook::itch
     };
 
     export template<typename T>
-    concept SystemEventListener =
-        requires(T listener,
-                 events::StartOfMessages startMessages,
-                 events::StartOfSystem startSystem,
-                 events::StartOfMarket startMarket,
-                 events::EndOfMarket endMarket,
-                 events::EndOfSystem endSystem,
-                 events::EndOfMessages endMessages) {
-            { listener.startOfMessages(startMessages) } -> std::same_as<void>;
-            { listener.startOfSystem(startSystem) } -> std::same_as<void>;
-            { listener.startOfMarket(startMarket) } -> std::same_as<void>;
-            { listener.endOfMarket(endMarket) } -> std::same_as<void>;
-            { listener.endOfSystem(endSystem) } -> std::same_as<void>;
-            { listener.endOfMessages(endMessages) } -> std::same_as<void>;
-        };
+    concept SystemEventListener = requires(T listener,
+                                           events::StartOfMessages startMessages,
+                                           events::StartOfSystem startSystem,
+                                           events::StartOfMarket startMarket,
+                                           events::EndOfMarket endMarket,
+                                           events::EndOfSystem endSystem,
+                                           events::EndOfMessages endMessages) {
+        { listener.startOfMessages(startMessages) } -> std::same_as<void>;
+        { listener.startOfSystem(startSystem) } -> std::same_as<void>;
+        { listener.startOfMarket(startMarket) } -> std::same_as<void>;
+        { listener.endOfMarket(endMarket) } -> std::same_as<void>;
+        { listener.endOfSystem(endSystem) } -> std::same_as<void>;
+        { listener.endOfMessages(endMessages) } -> std::same_as<void>;
+    };
 
 }  // namespace alpbook::itch

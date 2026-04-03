@@ -18,6 +18,7 @@ target_sources(alpdaq
         src/simulated.cppm
         src/simulated/binary.cppm
         src/system.cppm
+        src/system/container.cppm
         src/system/state.cppm
 )
 

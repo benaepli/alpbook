@@ -24,6 +24,10 @@ namespace alpdaq
         Recovery,
 
         EndOfDay,
+
+        /// Terminate immediately flushes all logs and attempts to shut down.
+        /// This happens upon an irrecoverable I/O error.
+        Terminate,
     };
 
     export using SessionId = std::array<uint8_t, 10>;

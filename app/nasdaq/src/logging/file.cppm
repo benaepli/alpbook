@@ -47,16 +47,15 @@ namespace alpdaq::logging
     {
     };
 
-    export using SystemData = std::variant<
-        GapRecoveryStarted,
-        TotalRecoveryStarted,
-        RecoveryCompleted,
-        ForceRestartTriggered,
-        SessionChange,
-        SessionRotated,
-        FatalInconsistency,
-        SystemStarted,
-        SystemStopped>;
+    export using SystemData = std::variant<GapRecoveryStarted,
+                                           TotalRecoveryStarted,
+                                           RecoveryCompleted,
+                                           ForceRestartTriggered,
+                                           SessionChange,
+                                           SessionRotated,
+                                           FatalInconsistency,
+                                           SystemStarted,
+                                           SystemStopped>;
 
     constexpr std::string_view levelTag(Level level)
     {
@@ -74,7 +73,7 @@ namespace alpdaq::logging
 
     export void writeSystemMessage(std::ostream& os, Message<SystemData> const& msg)
     {
-        using alpdaq::internal::Overloaded;
+        using internal::Overloaded;
         auto tag = levelTag(msg.level);
         std::visit(
             Overloaded {
@@ -82,27 +81,31 @@ namespace alpdaq::logging
                 { std::print(os, "[{}] gap recovery started\n", tag); },
                 [&](TotalRecoveryStarted const&)
                 { std::print(os, "[{}] total recovery started\n", tag); },
-                [&](RecoveryCompleted const&)
-                { std::print(os, "[{}] recovery completed\n", tag); },
+                [&](RecoveryCompleted const&) { std::print(os, "[{}] recovery completed\n", tag); },
                 [&](ForceRestartTriggered const&)
                 { std::print(os, "[{}] force restart triggered\n", tag); },
                 [&](SessionChange const& e)
                 {
-                    std::print(
-                        os,
-                        "[{}] session changed: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\n",
-                        tag,
-                        e.id[0], e.id[1], e.id[2], e.id[3], e.id[4],
-                        e.id[5], e.id[6], e.id[7], e.id[8], e.id[9]);
+                    std::print(os,
+                               "[{}] session changed: "
+                               "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\n",
+                               tag,
+                               e.id[0],
+                               e.id[1],
+                               e.id[2],
+                               e.id[3],
+                               e.id[4],
+                               e.id[5],
+                               e.id[6],
+                               e.id[7],
+                               e.id[8],
+                               e.id[9]);
                 },
-                [&](SessionRotated const&)
-                { std::print(os, "[{}] session rotated\n", tag); },
+                [&](SessionRotated const&) { std::print(os, "[{}] session rotated\n", tag); },
                 [&](FatalInconsistency const&)
                 { std::print(os, "[{}] fatal inconsistency detected\n", tag); },
-                [&](SystemStarted const&)
-                { std::print(os, "[{}] system started\n", tag); },
-                [&](SystemStopped const&)
-                { std::print(os, "[{}] system stopped\n", tag); },
+                [&](SystemStarted const&) { std::print(os, "[{}] system started\n", tag); },
+                [&](SystemStopped const&) { std::print(os, "[{}] system stopped\n", tag); },
             },
             msg.data);
     }
@@ -186,15 +189,9 @@ namespace alpdaq::logging
             logger_->tryEnqueueUnchecked({Level::Info, SessionChange {id}});
         }
 
-        void logSystemStarted()
-        {
-            logger_->tryEnqueueUnchecked({Level::Info, SystemStarted {}});
-        }
+        void logSystemStarted() { logger_->tryEnqueueUnchecked({Level::Info, SystemStarted {}}); }
 
-        void logSystemStopped()
-        {
-            logger_->tryEnqueueUnchecked({Level::Info, SystemStopped {}});
-        }
+        void logSystemStopped() { logger_->tryEnqueueUnchecked({Level::Info, SystemStopped {}}); }
 
         void rotateSession() { logger_->flushSession(); }
 
