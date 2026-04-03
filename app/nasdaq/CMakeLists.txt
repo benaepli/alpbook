@@ -8,6 +8,7 @@ target_sources(alpdaq
         src/alpdaq.cppm
         src/config.cppm
         src/logging.cppm
+        src/logging/file.cppm
         src/logging/logger.cppm
         src/logging/messages.cppm
         src/network.cppm

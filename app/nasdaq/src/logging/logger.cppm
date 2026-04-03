@@ -1,8 +1,6 @@
 module;
 
 #include <expected>
-#include <filesystem>
-#include <fstream>
 #include <utility>
 #include <variant>
 
@@ -26,22 +24,34 @@ namespace alpdaq::logging
         StoppedRunning,
     };
 
-    export template<typename T>
-    concept OutputSink = requires(T& t, Message msg) {
+    export template<typename T, typename Data>
+    concept OutputSink = requires(T& t, Message<Data> msg) {
         { t << msg } -> std::same_as<T&>;
         noexcept(t << msg);
+
+        /// Rotate serves a synchronization point. It indicates that flush() has been called
+        /// and all messages prior to that flush() have been processed.
+        { t.rotate() } -> std::same_as<void>;
+        noexcept(t.rotate());
     };
 
     struct StopSignal
     {
     };
 
-    struct alignas(std::hardware_destructive_interference_size) LogEntry
+    struct FlushSignal
     {
-        std::variant<StopSignal, Message> entry;
+        std::atomic<bool>* isFlushed;
     };
 
-    export template<OutputSink O>
+    template<typename Data>
+    struct alignas(std::hardware_destructive_interference_size) LogEntry
+    {
+        std::variant<StopSignal, FlushSignal, Message<Data>> entry;
+    };
+
+    export template<typename O, typename Data>
+        requires OutputSink<O, Data>
     class Logger
     {
       public:
@@ -67,11 +77,17 @@ namespace alpdaq::logging
             }
 
             internal::Backoff<BUSY_THRESHOLD, RELAX_THRESHOLD> backoff {};
+            bool draining = false;
+
             while (true)
             {
-                LogEntry top;
+                LogEntry<Data> top;
                 if (!queue_.try_dequeue(top))
                 {
+                    if (draining)
+                    {
+                        break;
+                    }
                     backoff.pause();
                     continue;
                 }
@@ -79,10 +95,18 @@ namespace alpdaq::logging
                 backoff.reset();
                 if (std::holds_alternative<StopSignal>(top.entry))
                 {
-                    break;
+                    draining = true;
+                    continue;
                 }
 
-                if (Message* msg = std::get_if<Message>(&top.entry))
+                if (FlushSignal* flush = std::get_if<FlushSignal>(&top.entry))
+                {
+                    output_.rotate();
+                    flush->isFlushed->store(true, std::memory_order_release);
+                    continue;
+                }
+
+                if (Message<Data>* msg = std::get_if<Message>(&top.entry))
                 {
                     output_ << *msg;
                 }
@@ -98,20 +122,38 @@ namespace alpdaq::logging
             {
                 return std::unexpected(LoggerError::NotRunning);
             }
-            enqueueUnchecked(LogEntry {.entry = StopSignal {}});
+            enqueueUnchecked(LogEntry<Data> {.entry = StopSignal {}});
             return {};
         }
 
         /// Tries to log a specific message and returns true if we have capacity.
         /// Delivery is best-effort for performance: if you call stop() then call this,
         /// there is a possibility this function may succeed without producing any logs.
-        bool tryEnqueueUnchecked(Message m) noexcept
+        bool tryEnqueueUnchecked(Message<Data> m) noexcept
         {
             return queue_.try_enqueue(LogEntry {.entry = m});
         }
 
+        void flushSession() noexcept
+        {
+            if (!running_.load(std::memory_order_acquire))
+            {
+                return;
+            };
+
+            std::atomic isFlushed {false};
+            enqueueUnchecked(LogEntry<Data> {.entry = FlushSignal {&isFlushed}});
+
+            internal::Backoff<BUSY_THRESHOLD, RELAX_THRESHOLD> backoff {};
+
+            while (!isFlushed.load(std::memory_order_acquire))
+            {
+                backoff.pause();
+            }
+        }
+
       private:
-        void enqueueUnchecked(LogEntry m) noexcept
+        void enqueueUnchecked(LogEntry<Data> m) noexcept
         {
             internal::Backoff<BUSY_THRESHOLD, RELAX_THRESHOLD> backoff {};
             while (true)
@@ -124,44 +166,9 @@ namespace alpdaq::logging
             }
         }
 
-        moodycamel::ReaderWriterQueue<LogEntry> queue_;
+        moodycamel::ReaderWriterQueue<LogEntry<Data>> queue_;
         O output_;
 
         std::atomic<bool> running_ {false};
     };
-
-    template<typename F>
-    concept FailureHandler = requires(F f, Message msg) {
-        { f(msg) } -> std::same_as<void>;
-    };
-
-    template<FailureHandler OnFailure>
-    struct FileOutput
-    {
-        std::filesystem::path path;
-        OnFailure onFailure;
-        std::ofstream stream;
-
-        // Must be noexcept to satisfy the OutputSink concept
-        FileOutput& operator<<(Message msg) noexcept
-        {
-            if (!stream.is_open())
-            {
-                onFailure(msg);
-                return *this;
-            }
-
-            // TODO: actually write logged messages
-            stream << "TODO" << "\n";
-
-            if (stream.fail())
-            {
-                onFailure(msg);
-                stream.clear();
-            }
-            return *this;
-        }
-    };
-
-    static_assert(OutputSink<FileOutput<void (*)(Message)>>);
 }  // namespace alpdaq::logging

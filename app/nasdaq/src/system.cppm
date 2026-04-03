@@ -75,7 +75,7 @@ namespace alpdaq
     {
         uint64_t sequenceNumber;
         std::span<std::byte const> payload;
-    }; 
+    };
 
     export template<typename T>
     concept ItchSource = requires(T t) {
@@ -87,10 +87,19 @@ namespace alpdaq
         noexcept(t.forceRestart());
     };
 
-    template<logging::OutputSink O>
+    export template<typename T>
+    concept SystemLogger = requires(T& t) {
+        /// For decoupling, we have a required function for every type of message that the system
+        /// needs to log.
+
+        // { t.tryEnqueueUnchecked(msg) } -> std::same_as<bool>;
+        { t.rotateSession() } -> std::same_as<void>;
+    };
+
+    template<SystemLogger Logger>
     struct SystemConfig
     {
-        std::shared_ptr<logging::Logger<O>> logger;
+        std::shared_ptr<Logger> logger;
         std::vector<alpbook::itch::StockTicker> stocks;
     };
 
@@ -127,12 +136,12 @@ namespace alpdaq
         AlreadyRunning,
     };
 
-    export template<typename Source, logging::OutputSink LogOutput>
+    export template<typename Source, SystemLogger Logger>
         requires ItchSource<Source>
     class System
     {
       public:
-        explicit System(Source source, SystemConfig<LogOutput> config) noexcept
+        explicit System(Source source, SystemConfig<Logger> config) noexcept
             : source_(std::move(source))
             , config_(std::move(config))
         {
@@ -320,6 +329,7 @@ namespace alpdaq
 
         SystemState runEndOfDay() noexcept
         {
+            config_.logger->rotateSession();
             clearOrderBooks();
             return SystemState::Waiting;
         }
@@ -374,7 +384,7 @@ namespace alpdaq
 
         Source source_;
 
-        SystemConfig<LogOutput> config_;
+        SystemConfig<Logger> config_;
         SystemState state_ = SystemState::Waiting;
 
         absl::flat_hash_set<alpbook::itch::StockTicker> trackedStocks_;
