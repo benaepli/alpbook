@@ -172,8 +172,8 @@ namespace alpdaq
                         state_ = recovery_ ? runAfterMarket<true>() : runAfterMarket<false>();
                         break;
                     case SystemState::AfterSystemHours:
-                        state_ = recovery_ ? runAfterSystemHours<true>()
-                                           : runAfterSystemHours<false>();
+                        state_ =
+                            recovery_ ? runAfterSystemHours<true>() : runAfterSystemHours<false>();
                         break;
                     case SystemState::EndOfDay:
                         state_ = runEndOfDay();
@@ -273,10 +273,6 @@ namespace alpdaq
                         {
                             nextState = triggerInconsistency();
                         }
-                    }
-                    else if (classification != itch::MessageClassification::Ignored)
-                    {
-                        nextState = triggerInconsistency();
                     }
                 },
                 [this](SourceEvent const& event, SystemState& nextState)
@@ -422,10 +418,21 @@ namespace alpdaq
                             }
                             break;
                         }
-                        case itch::MessageClassification::Order:
                         case itch::MessageClassification::StockDirectory:
                         {
-                            nextState = triggerInconsistency();
+                            if (!handleStockDirectory(payload)) [[unlikely]]
+                            {
+                                nextState = triggerInconsistency();
+                            }
+                            break;
+                        }
+                        case itch::MessageClassification::Order:
+                        {
+                            if (handleOrderMessage(payload) == ProcessResult::Inconsistency)
+                                [[unlikely]]
+                            {
+                                nextState = triggerInconsistency();
+                            }
                             break;
                         }
                         case itch::MessageClassification::Ignored:
@@ -555,23 +562,30 @@ namespace alpdaq
             {
                 return false;
             }
-            auto const assetId = itch::parseID(payload);
+            auto const locate = itch::parseID(payload);
             auto const dir = itch::parseStockDirectoryMessage(payload);
 
-            // A bijective mapping.
-            if (dayState_.tickers.contains(dir.stock) || dayState_.subscribed.test(assetId))
-                [[unlikely]]
+            auto it = dayState_.tickers.find(dir.stock);
+            if (it != dayState_.tickers.end())
+            {
+                if (it->second == locate)
+                    return true;
+
+                dayState_.subscribed.reset(it->second);
+                it->second = locate;
+                dayState_.subscribed.set(locate);
+            }
+            else if (dayState_.subscribed.test(locate)) [[unlikely]]
             {
                 return false;
             }
-
-            if (std::ranges::find(config_.stocks, dir.stock) != config_.stocks.end())
+            else if (std::ranges::find(config_.stocks, dir.stock) != config_.stocks.end())
             {
-                dayState_.tickers.emplace(dir.stock, assetId);
-                dayState_.subscribed.set(assetId);
+                dayState_.tickers.emplace(dir.stock, locate);
+                dayState_.subscribed.set(locate);
             }
 
-            container_.onStockDirectory(assetId, dir.stock);
+            container_.onStockDirectory(locate, dir.stock);
             return true;
         }
 
@@ -653,7 +667,11 @@ namespace alpdaq
                 }
                 case itch::MessageClassification::StockDirectory:
                 {
-                    return ProcessResult::Inconsistency;
+                    if (!handleStockDirectory(payload)) [[unlikely]]
+                    {
+                        return ProcessResult::Inconsistency;
+                    }
+                    return ProcessResult::Ok;
                 }
                 case itch::MessageClassification::Ignored:
                 {

@@ -9,6 +9,8 @@ module;
 #include <utility>
 #include <vector>
 
+#include <absl/container/flat_hash_map.h>
+
 export module alpdaq.system.container.strategized;
 
 import alpbook.strategy;
@@ -173,6 +175,7 @@ namespace alpdaq::system::container
             , subscribed_(std::move(other.subscribed_))
             , storage_(std::move(other.storage_))
             , contexts_(other.contexts_)
+            , tickerToLocate_(std::move(other.tickerToLocate_))
         {
             other.contexts_.fill(nullptr);
         }
@@ -186,6 +189,7 @@ namespace alpdaq::system::container
                 subscribed_ = std::move(other.subscribed_);
                 storage_ = std::move(other.storage_);
                 contexts_ = other.contexts_;
+                tickerToLocate_ = std::move(other.tickerToLocate_);
                 other.contexts_.fill(nullptr);
             }
             return *this;
@@ -202,14 +206,28 @@ namespace alpdaq::system::container
 
         void onPreMarket() {}
 
-        void onStockDirectory(uint16_t assetId, itch::StockTicker ticker)
+        void onStockDirectory(uint16_t locate, itch::StockTicker ticker)
         {
             if (std::ranges::find(subscribed_, ticker) == subscribed_.end())
+            {
                 return;
+            }
 
-            auto* ptr = storage_->allocator.allocate(1);
-            std::construct_at(ptr, factory_, assetId);
-            contexts_[assetId] = ptr;
+            auto it = tickerToLocate_.find(ticker);
+            if (it != tickerToLocate_.end())
+            {
+                uint16_t oldLocate = it->second;
+                contexts_[locate] = contexts_[oldLocate];
+                contexts_[oldLocate] = nullptr;
+                it->second = locate;
+            }
+            else
+            {
+                auto* ptr = storage_->allocator.allocate(1);
+                std::construct_at(ptr, factory_, locate);
+                contexts_[locate] = ptr;
+                tickerToLocate_.emplace(ticker, locate);
+            }
         }
 
         void add(uint16_t assetId, nasdaq::AddOrder msg) { contexts_[assetId]->add(msg); }
@@ -271,6 +289,7 @@ namespace alpdaq::system::container
                     ctx = nullptr;
                 }
             }
+            tickerToLocate_.clear();
         }
 
       private:
@@ -278,5 +297,6 @@ namespace alpdaq::system::container
         std::vector<itch::StockTicker> subscribed_;
         std::unique_ptr<InternalStorage> storage_;
         std::array<Ctx*, 65536> contexts_ {};
+        absl::flat_hash_map<itch::StockTicker, uint16_t> tickerToLocate_;
     };
 }  // namespace alpdaq::system::container
