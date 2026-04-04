@@ -34,6 +34,9 @@ namespace alpdaq::system
         { container.cancel(assetId, cancelMsg) } -> std::same_as<void>;
         { container.replace(assetId, replaceMsg) } -> std::same_as<void>;
 
+        { container.suspendTrading() } -> std::same_as<void>;
+        { container.resumeTrading() } -> std::same_as<void>;
+
         { container.onTradingAction(assetId, tradingState) } -> std::same_as<void>;
         { container.clearAll() } -> std::same_as<void>;
     };

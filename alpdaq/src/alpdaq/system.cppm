@@ -409,6 +409,7 @@ namespace alpdaq
                         {
                             if (parseSystemEvent(payload) == ItchSystemEvent::StartOfMarket)
                             {
+                                container_.resumeTrading();
                                 nextState = SystemState::Live;
                             }
                             else
@@ -470,6 +471,7 @@ namespace alpdaq
                             [this, &nextState](RecoveryComplete const&)
                             {
                                 config_.logger->logRecoveryComplete();
+                                container_.resumeTrading();
                                 nextState = SystemState::Live;
                             },
                             [this, &nextState](GapRecovery const&)
@@ -555,6 +557,8 @@ namespace alpdaq
                 event);
         }
 
+        bool isSubscribed(uint32_t id) const noexcept { return dayState_.subscribed.test(id); }
+
         /// handleStockDirectory parses a stock directory message and updates the container
         /// and state appropriately. Returns true on success.
         bool handleStockDirectory(std::span<std::byte const> payload) noexcept
@@ -590,7 +594,13 @@ namespace alpdaq
             {
                 return false;
             }
+
             auto const assetId = itch::parseID(payload);
+            if (!isSubscribed(assetId))
+            {
+                return true;
+            }
+
             auto const action = itch::parseStockTradingActionMessage(payload);
             container_.onTradingAction(assetId, action.state);
             return true;
@@ -599,8 +609,7 @@ namespace alpdaq
         ProcessResult handleOrderMessage(std::span<std::byte const> payload) noexcept
         {
             auto const assetId = itch::parseID(payload);
-
-            if (!dayState_.subscribed.test(assetId))
+            if (!isSubscribed(assetId))
             {
                 return ProcessResult::Ok;
             }
@@ -666,10 +675,7 @@ namespace alpdaq
 
             return ProcessResult::Ok;
         }
-        static void gapRecovery() noexcept
-        {
-            // For now: no action needed
-        }
+        void gapRecovery() noexcept { container_.suspendTrading(); }
         void clearOrderBooks() noexcept
         {
             container_.clearAll();

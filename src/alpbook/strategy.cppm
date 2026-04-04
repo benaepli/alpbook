@@ -20,7 +20,8 @@ namespace alpbook::strategy
             { strategy.onTopBidChange(price, qty) } -> std::same_as<void>;
             { strategy.onTopAskChange(price, qty) } -> std::same_as<void>;
 
-            { strategy.onSystemHalt() } -> std::same_as<void>;
+            { strategy.onHalt() } -> std::same_as<void>;
+            { strategy.onResume() } -> std::same_as<void>;
         };
 
     export template<typename T, typename B>
