@@ -4,7 +4,7 @@ module;
 #include <cstdint>
 #include <vector>
 
-export module alpdaq.system.container;
+export module alpdaq.system.container.container;
 
 import alpbook.book.nasdaq;
 import alpbook.itch.messages;

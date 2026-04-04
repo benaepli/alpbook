@@ -1,34 +1,13 @@
-add_executable(alpdaq
+add_executable(alpdaq_app
         src/main.cpp
 )
 
-target_sources(alpdaq
-        PUBLIC
-        FILE_SET CXX_MODULES FILES
-        src/alpdaq.cppm
-        src/config.cppm
-        src/internal.cppm
-        src/internal/overloaded.cppm
-        src/logging.cppm
-        src/logging/file.cppm
-        src/logging/logger.cppm
-        src/logging/messages.cppm
-        src/network.cppm
-        src/placement.cppm
-        src/simulated.cppm
-        src/simulated/binary.cppm
-        src/system.cppm
-        src/system/container.cppm
-        src/system/state.cppm
-)
-
-target_link_libraries(alpdaq
+target_link_libraries(alpdaq_app
         PRIVATE
-        alpbook
+        alpdaq
         tomlplusplus::tomlplusplus
-        readerwriterqueue
-        hwloc
-        spdlog::spdlog
 )
 
-target_compile_features(alpdaq PRIVATE cxx_std_23)
+target_compile_features(alpdaq_app PRIVATE cxx_std_23)
+
+set_target_properties(alpdaq_app PROPERTIES OUTPUT_NAME alpdaq)

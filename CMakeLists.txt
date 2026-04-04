@@ -113,6 +113,7 @@ if (ALPBOOK_BUILD_BENCHMARKS)
 endif ()
 
 if (ALPBOOK_BUILD_APP)
+    add_subdirectory(alpdaq)
     add_subdirectory(app)
 endif ()
 
