@@ -40,6 +40,9 @@ namespace alpdaq::logging
     export struct SessionRotated
     {
     };
+    export struct InconsistencyDetected
+    {
+    };
     export struct FatalInconsistency
     {
     };
@@ -57,6 +60,7 @@ namespace alpdaq::logging
                                            ForceRestartTriggered,
                                            SessionChange,
                                            SessionRotated,
+                                           InconsistencyDetected,
                                            FatalInconsistency,
                                            SystemStarted,
                                            SystemStopped>;
@@ -108,6 +112,8 @@ namespace alpdaq::logging
                                e.id[9]);
                 },
                 [&](SessionRotated const&) { std::print(os, "[{}] session rotated\n", tag); },
+                [&](InconsistencyDetected const&)
+                { std::print(os, "[{}] inconsistency detected\n", tag); },
                 [&](FatalInconsistency const&)
                 { std::print(os, "[{}] fatal inconsistency detected\n", tag); },
                 [&](SystemStarted const&) { std::print(os, "[{}] system started\n", tag); },
@@ -188,6 +194,11 @@ namespace alpdaq::logging
         void logForceRestart()
         {
             logger_->tryEnqueueUnchecked({Level::Error, ForceRestartTriggered {}});
+        }
+
+        void logInconsistency()
+        {
+            logger_->tryEnqueueUnchecked({Level::Warn, InconsistencyDetected {}});
         }
 
         void logFatalInconsistency()

@@ -20,6 +20,7 @@ import alpdaq.internal;
 import alpdaq.logging;
 import alpdaq.system.state;
 import alpbook.itch;
+import alpbook.book;
 import alpdaq.system.container;
 
 namespace alpdaq
@@ -58,25 +59,53 @@ namespace alpdaq
         }
     };
 
-    enum class WaitResult : uint8_t
+    enum class ItchSystemEvent : uint8_t
     {
-        Inconsistency,
-        StartupEvent,
+        None,
+        StartOfMessages,
+        StartOfSystem,
+        StartOfMarket,
+        EndOfMarket,
+        EndOfSystem,
+        EndOfMessages,
     };
 
-    enum class StartupResult : uint8_t
+    ItchSystemEvent parseSystemEvent(std::span<std::byte const> payload) noexcept
     {
-        Ok,
-        Inconsistency,
-        PreMarketEvent,
-    };
+        struct Listener
+        {
+            ItchSystemEvent& result;
+            void startOfMessages(itch::events::StartOfMessages) const
+            {
+                result = ItchSystemEvent::StartOfMessages;
+            }
+            void startOfSystem(itch::events::StartOfSystem) const
+            {
+                result = ItchSystemEvent::StartOfSystem;
+            }
+            void startOfMarket(itch::events::StartOfMarket) const
+            {
+                result = ItchSystemEvent::StartOfMarket;
+            }
+            void endOfMarket(itch::events::EndOfMarket) const
+            {
+                result = ItchSystemEvent::EndOfMarket;
+            }
+            void endOfSystem(itch::events::EndOfSystem) const
+            {
+                result = ItchSystemEvent::EndOfSystem;
+            }
+            void endOfMessages(itch::events::EndOfMessages) const
+            {
+                result = ItchSystemEvent::EndOfMessages;
+            }
+        };
 
-    enum class PreMarketResult : uint8_t
-    {
-        Ok,
-        Inconsistency,
-        LiveEvent,
-    };
+        ItchSystemEvent result = ItchSystemEvent::None;
+        Listener listener {result};
+        itch::parseSystemEventMessage(payload, listener);
+        return result;
+    }
 
     enum class ProcessResult : uint8_t
     {
@@ -146,6 +175,16 @@ namespace alpdaq
                         state_ = runLive();
                         break;
                     }
+                    case SystemState::AfterMarket:
+                    {
+                        state_ = runAfterMarket();
+                        break;
+                    }
+                    case SystemState::AfterSystemHours:
+                    {
+                        state_ = runAfterSystemHours();
+                        break;
+                    }
                     case SystemState::Recovery:
                     {
                         state_ = runRecovery();
@@ -167,62 +206,27 @@ namespace alpdaq
         }
 
       private:
-        /// runWaiting mostly only allows for one message: moving to the startup state.
-        SystemState runWaiting() noexcept
+        SystemState triggerInconsistency() noexcept
         {
-            SystemState nextState = SystemState::Waiting;
-            auto handleData = [this, &nextState](ItchView const& view)
-            {
-                auto result = processWaitingMessage(view.payload);
+            config_.logger->logInconsistency();
+            clearOrderBooks();
+            config_.logger->logForceRestart();
+            source_.forceRestart();
+            return SystemState::Recovery;
+        }
 
-                if (result == WaitResult::Inconsistency)
-                {
-                    config_.logger->logInconsistency();
-                    clearOrderBooks();
-                    config_.logger->logForceRestart();
-                    source_.forceRestart();
-                    nextState = SystemState::Recovery;
-                }
-                else if (result == WaitResult::StartupEvent)
-                {
-                    nextState = SystemState::Startup;
-                }
-            };
+        template<typename DataHandler, typename EventHandler>
+        SystemState runStateLoop(SystemState currentState,
+                                 DataHandler&& dataHandler,
+                                 EventHandler&& eventHandler) noexcept
+        {
+            SystemState nextState = currentState;
 
-            auto handleEvent = [this, &nextState](SourceEvent const& event)
-            {
-                std::visit(
-                    Overloaded {
-                        [this, &nextState](GapRecovery const&)
-                        {
-                            config_.logger->logGapRecovery();
-                            nextState = SystemState::Recovery;
-                        },
-                        [this, &nextState](TotalRecovery const&)
-                        {
-                            config_.logger->logTotalRecovery();
-                            nextState = SystemState::Recovery;
-                        },
-                        [this](SessionChanged const& e)
-                        { config_.logger->logSessionChange(e.newSession); },
-                        [this, &nextState](FatalError const&)
-                        {
-                            clearOrderBooks();
-                            nextState = SystemState::Terminate;
-                        },
-                        [this, &nextState](auto const&)
-                        {
-                            clearOrderBooks();
-                            config_.logger->logForceRestart();
-                            source_.forceRestart();
-                            nextState = SystemState::Recovery;
-                        },
-                    },
-                    event);
-            };
+            auto handleData = [&](ItchView const& view) { dataHandler(view.payload, nextState); };
 
-            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Waiting)
-                [[likely]]
+            auto handleEvent = [&](SourceEvent const& event) { eventHandler(event, nextState); };
+
+            while (running_.load(std::memory_order_relaxed) && nextState == currentState) [[likely]]
             {
                 source_.poll(handleData, handleEvent);
             }
@@ -230,141 +234,271 @@ namespace alpdaq
             return nextState;
         }
 
-        /// runStartup handles moving to the pre-market state and updating stock directories.
+        SystemState runAwaitingSystemEvent(SystemState currentState,
+                                           ItchSystemEvent expectedEvent,
+                                           SystemState successState) noexcept
+        {
+            return runStateLoop(
+                currentState,
+                [&](std::span<std::byte const> payload, SystemState& nextState)
+                {
+                    auto classification = itch::classifyMessage(payload);
+
+                    if (classification == itch::MessageClassification::SystemEvent)
+                    {
+                        if (parseSystemEvent(payload) == expectedEvent)
+                        {
+                            nextState = successState;
+                        }
+                        else
+                        {
+                            nextState = triggerInconsistency();
+                        }
+                    }
+                },
+                [this](SourceEvent const& event, SystemState& nextState)
+                { normalEventHandler(event, nextState); });
+        }
+
+        SystemState runWaiting() noexcept
+        {
+            return runStateLoop(
+                SystemState::Waiting,
+                [this](std::span<std::byte const> payload, SystemState& nextState)
+                {
+                    if (payload.size() < itch::SYSTEM_EVENT_MESSAGE_SIZE) [[unlikely]]
+                    {
+                        nextState = triggerInconsistency();
+                        return;
+                    }
+
+                    auto classification = itch::classifyMessage(payload);
+                    if (classification == itch::MessageClassification::SystemEvent)
+                    {
+                        if (parseSystemEvent(payload) == ItchSystemEvent::StartOfMessages)
+                        {
+                            nextState = SystemState::Startup;
+                        }
+                        else
+                        {
+                            nextState = triggerInconsistency();
+                        }
+                    }
+                    else if (classification != itch::MessageClassification::Ignored)
+                    {
+                        nextState = triggerInconsistency();
+                    }
+                },
+                [this](SourceEvent const& event, SystemState& nextState)
+                {
+                    std::visit(
+                        Overloaded {
+                            [this, &nextState](GapRecovery const&)
+                            {
+                                config_.logger->logGapRecovery();
+                                nextState = SystemState::Recovery;
+                            },
+                            [this, &nextState](TotalRecovery const&)
+                            {
+                                config_.logger->logTotalRecovery();
+                                nextState = SystemState::Recovery;
+                            },
+                            [this](SessionChanged const& e)
+                            { config_.logger->logSessionChange(e.newSession); },
+                            [this, &nextState](FatalError const&)
+                            {
+                                clearOrderBooks();
+                                nextState = SystemState::Terminate;
+                            },
+                            [this, &nextState](auto const&)
+                            {
+                                clearOrderBooks();
+                                config_.logger->logForceRestart();
+                                source_.forceRestart();
+                                nextState = SystemState::Recovery;
+                            },
+                        },
+                        event);
+                });
+        }
+
         SystemState runStartup() noexcept
         {
-            SystemState nextState = SystemState::Startup;
-            auto handleData = [this, &nextState](ItchView const& view)
-            {
-                auto result = processStartupMessage(view.payload);
-
-                if (result == StartupResult::Inconsistency) [[unlikely]]
+            return runStateLoop(
+                SystemState::Startup,
+                [this](std::span<std::byte const> payload, SystemState& nextState)
                 {
-                    config_.logger->logInconsistency();
-                    clearOrderBooks();
-                    config_.logger->logForceRestart();
-                    source_.forceRestart();
-                    nextState = SystemState::Recovery;
-                }
-                else if (result == StartupResult::PreMarketEvent) [[unlikely]]
-                {
-                    config_.logger->logPreMarket();
-                    container_.onPreMarket();
-                    nextState = SystemState::PreMarket;
-                }
-            };
+                    if (payload.size() < itch::SYSTEM_EVENT_MESSAGE_SIZE) [[unlikely]]
+                    {
+                        nextState = triggerInconsistency();
+                        return;
+                    }
 
-            auto handleEvent = [this, &nextState](SourceEvent const& event)
-            { normalEventHandler(event, nextState); };
-
-            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Startup)
-                [[likely]]
-            {
-                source_.poll(handleData, handleEvent);
-            }
-
-            return nextState;
+                    auto classification = itch::classifyMessage(payload);
+                    switch (classification)
+                    {
+                        case itch::MessageClassification::StockDirectory:
+                        {
+                            if (!handleStockDirectory(payload))
+                            {
+                                nextState = triggerInconsistency();
+                            }
+                            break;
+                        }
+                        case itch::MessageClassification::StockTradingAction:
+                        {
+                            if (!handleStockTradingAction(payload))
+                            {
+                                nextState = triggerInconsistency();
+                            }
+                            break;
+                        }
+                        case itch::MessageClassification::SystemEvent:
+                        {
+                            if (parseSystemEvent(payload) == ItchSystemEvent::StartOfSystem)
+                            {
+                                config_.logger->logPreMarket();
+                                container_.onPreMarket();
+                                nextState = SystemState::PreMarket;
+                            }
+                            else
+                            {
+                                nextState = triggerInconsistency();
+                            }
+                            break;
+                        }
+                        case itch::MessageClassification::Order:
+                        {
+                            nextState = triggerInconsistency();
+                            break;
+                        }
+                        case itch::MessageClassification::Ignored:
+                        {
+                            break;
+                        }
+                    }
+                },
+                [this](SourceEvent const& event, SystemState& nextState)
+                { normalEventHandler(event, nextState); });
         }
 
         SystemState runPreMarket() noexcept
         {
-            SystemState nextState = SystemState::PreMarket;
-            auto handleData = [this, &nextState](ItchView const& view)
-            {
-                auto result = processPreMarketMessage(view.payload);
-
-                if (result == PreMarketResult::Inconsistency) [[unlikely]]
+            return runStateLoop(
+                SystemState::PreMarket,
+                [this](std::span<std::byte const> payload, SystemState& nextState)
                 {
-                    config_.logger->logInconsistency();
-                    clearOrderBooks();
-                    config_.logger->logForceRestart();
-                    source_.forceRestart();
-                    nextState = SystemState::Recovery;
-                }
-                else if (result == PreMarketResult::LiveEvent) [[unlikely]]
-                {
-                    nextState = SystemState::Live;
-                }
-            };
+                    if (payload.size() < itch::SYSTEM_EVENT_MESSAGE_SIZE) [[unlikely]]
+                    {
+                        nextState = triggerInconsistency();
+                        return;
+                    }
 
-            auto handleEvent = [this, &nextState](SourceEvent const& event)
-            { normalEventHandler(event, nextState); };
-
-            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::PreMarket)
-                [[likely]]
-            {
-                source_.poll(handleData, handleEvent);
-            }
-
-            return nextState;
+                    auto classification = itch::classifyMessage(payload);
+                    switch (classification)
+                    {
+                        case itch::MessageClassification::StockTradingAction:
+                        {
+                            if (!handleStockTradingAction(payload)) [[unlikely]]
+                            {
+                                nextState = triggerInconsistency();
+                            }
+                            break;
+                        }
+                        case itch::MessageClassification::SystemEvent:
+                        {
+                            if (parseSystemEvent(payload) == ItchSystemEvent::StartOfMarket)
+                            {
+                                nextState = SystemState::Live;
+                            }
+                            else
+                            {
+                                nextState = triggerInconsistency();
+                            }
+                            break;
+                        }
+                        case itch::MessageClassification::Order:
+                        case itch::MessageClassification::StockDirectory:
+                        {
+                            nextState = triggerInconsistency();
+                            break;
+                        }
+                        case itch::MessageClassification::Ignored:
+                        {
+                            break;
+                        }
+                    }
+                },
+                [this](SourceEvent const& event, SystemState& nextState)
+                { normalEventHandler(event, nextState); });
         }
 
         SystemState runLive() noexcept
         {
-            SystemState nextState = SystemState::Live;
-            auto handleData = [this, &nextState](ItchView const& view)
-            { normalDataHandler(view, nextState); };
+            return runStateLoop(
+                SystemState::Live,
+                [this](std::span<std::byte const> payload, SystemState& nextState)
+                { normalDataHandler(payload, nextState); },
+                [this](SourceEvent const& event, SystemState& nextState)
+                { normalEventHandler(event, nextState); });
+        }
 
-            auto handleEvent = [this, &nextState](SourceEvent const& event)
-            { normalEventHandler(event, nextState); };
+        SystemState runAfterMarket() noexcept
+        {
+            return runAwaitingSystemEvent(SystemState::AfterMarket,
+                                          ItchSystemEvent::EndOfSystem,
+                                          SystemState::AfterSystemHours);
+        }
 
-            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Live)
-                [[likely]]
-            {
-                source_.poll(handleData, handleEvent);
-            }
-            return nextState;
+        SystemState runAfterSystemHours() noexcept
+        {
+            return runAwaitingSystemEvent(SystemState::AfterSystemHours,
+                                          ItchSystemEvent::EndOfMessages,
+                                          SystemState::EndOfDay);
         }
 
         SystemState runRecovery() noexcept
         {
-            SystemState nextState = SystemState::Recovery;
-            auto handleData = [this, &nextState](ItchView const& view)
-            { normalDataHandler(view, nextState); };
-
-            auto handleEvent = [this, &nextState](SourceEvent const& event)
-            {
-                std::visit(
-                    Overloaded {
-                        [this, &nextState](RecoveryComplete const&)
-                        {
-                            config_.logger->logRecoveryComplete();
-                            nextState = SystemState::Live;
+            return runStateLoop(
+                SystemState::Recovery,
+                [this](std::span<std::byte const> payload, SystemState& nextState)
+                { normalDataHandler(payload, nextState); },
+                [this](SourceEvent const& event, SystemState& nextState)
+                {
+                    std::visit(
+                        Overloaded {
+                            [this, &nextState](RecoveryComplete const&)
+                            {
+                                config_.logger->logRecoveryComplete();
+                                nextState = SystemState::Live;
+                            },
+                            [this, &nextState](GapRecovery const&)
+                            {
+                                config_.logger->logGapRecovery();
+                                gapRecovery();
+                                nextState = SystemState::Recovery;
+                            },
+                            [this, &nextState](TotalRecovery const&)
+                            {
+                                config_.logger->logTotalRecovery();
+                                clearOrderBooks();
+                                nextState = SystemState::Recovery;
+                            },
+                            [this, &nextState](FatalError const&)
+                            {
+                                clearOrderBooks();
+                                nextState = SystemState::Terminate;
+                            },
+                            [this, &nextState](auto const&)
+                            {
+                                clearOrderBooks();
+                                config_.logger->logForceRestart();
+                                source_.forceRestart();
+                                nextState = SystemState::Recovery;
+                            },
                         },
-                        [this, &nextState](GapRecovery const&)
-                        {
-                            config_.logger->logGapRecovery();
-                            gapRecovery();
-                            nextState = SystemState::Recovery;
-                        },
-                        [this, &nextState](TotalRecovery const&)
-                        {
-                            config_.logger->logTotalRecovery();
-                            clearOrderBooks();
-                            nextState = SystemState::Recovery;
-                        },
-                        [this, &nextState](FatalError const&)
-                        {
-                            clearOrderBooks();
-                            nextState = SystemState::Terminate;
-                        },
-                        [this, &nextState](auto const&)
-                        {
-                            clearOrderBooks();
-                            config_.logger->logForceRestart();
-                            source_.forceRestart();
-                            nextState = SystemState::Recovery;
-                        },
-                    },
-                    event);
-            };
-
-            while (running_.load(std::memory_order_relaxed) && nextState == SystemState::Recovery)
-                [[likely]]
-            {
-                source_.poll(handleData, handleEvent);
-            }
-            return nextState;
+                        event);
+                });
         }
 
         SystemState runEndOfDay() noexcept
@@ -375,27 +509,20 @@ namespace alpdaq
             return SystemState::Waiting;
         }
 
-        /// The data handler for the normal (live and recovery) case.
-        /// Calls processLiveMessage to update state appropriately.
-        void normalDataHandler(ItchView const& view, SystemState& nextState) noexcept
+        void normalDataHandler(std::span<std::byte const> payload, SystemState& nextState) noexcept
         {
-            auto result = processLiveMessage(view.payload);
+            auto result = processLiveMessage(payload);
 
             if (result == ProcessResult::Inconsistency) [[unlikely]]
             {
-                config_.logger->logInconsistency();
-                clearOrderBooks();
-                config_.logger->logForceRestart();
-                source_.forceRestart();
-                nextState = SystemState::Recovery;
+                nextState = triggerInconsistency();
             }
             else if (result == ProcessResult::EndOfDayEvent) [[unlikely]]
             {
-                nextState = SystemState::EndOfDay;
+                nextState = SystemState::AfterMarket;
             }
         }
 
-        /// The event handler for the normal (live and recovery) case.
         void normalEventHandler(SourceEvent const& event, SystemState& nextState) noexcept
         {
             std::visit(
@@ -469,208 +596,76 @@ namespace alpdaq
             return true;
         }
 
-        WaitResult processWaitingMessage(std::span<std::byte const> payload) noexcept
+        ProcessResult handleOrderMessage(std::span<std::byte const> payload) noexcept
         {
-            if (payload.size() < itch::SYSTEM_EVENT_MESSAGE_SIZE) [[unlikely]]
+            auto const assetId = itch::parseID(payload);
+
+            if (!dayState_.subscribed.test(assetId))
             {
-                return WaitResult::Inconsistency;
+                return ProcessResult::Ok;
             }
 
-            itch::MessageClassification const classification = itch::classifyMessage(payload);
-            switch (classification)
-            {
-                case itch::MessageClassification::Order:
-                case itch::MessageClassification::StockDirectory:
-                case itch::MessageClassification::StockTradingAction:
-                case itch::MessageClassification::Ignored:
-                {
-                    return WaitResult::Inconsistency;
-                }
-                case itch::MessageClassification::SystemEvent:
-                {
-                    break;
-                }
-            }
-
-            WaitResult result = WaitResult::Inconsistency;
             struct Listener
             {
-                WaitResult& result;
-                void startOfMessages(itch::events::StartOfMessages) const
-                {
-                    result = WaitResult::StartupEvent;
-                }
-                void startOfSystem(itch::events::StartOfSystem) const
-                {
-                    result = WaitResult::Inconsistency;
-                }
-                void startOfMarket(itch::events::StartOfMarket) const
-                {
-                    result = WaitResult::Inconsistency;
-                }
-                void endOfMarket(itch::events::EndOfMarket) const
-                {
-                    result = WaitResult::Inconsistency;
-                }
-                void endOfSystem(itch::events::EndOfSystem) const
-                {
-                    result = WaitResult::Inconsistency;
-                }
-                void endOfMessages(itch::events::EndOfMessages) const
-                {
-                    result = WaitResult::Inconsistency;
-                }
+                Container& container;
+                uint16_t assetId;
+
+                void add(nasdaq::AddOrder msg) { container.add(assetId, msg); }
+                void execute(nasdaq::ExecuteOrder msg) { container.execute(assetId, msg); }
+                void reduce(nasdaq::DecrementShares msg) { container.reduce(assetId, msg); }
+                void cancel(nasdaq::CancelOrder msg) { container.cancel(assetId, msg); }
+                void replace(nasdaq::ReplaceOrder msg) { container.replace(assetId, msg); }
             };
 
-            Listener listener {result};
-            itch::parseSystemEventMessage<Listener>(payload, listener);
-            return result;
-        }
+            Listener listener {container_, assetId};
+            auto result = itch::parseOrderMessage(payload, listener);
 
-        StartupResult processStartupMessage(std::span<std::byte const> payload) noexcept
-        {
-            if (payload.size() < itch::SYSTEM_EVENT_MESSAGE_SIZE) [[unlikely]]
+            if (!result) [[unlikely]]
             {
-                return StartupResult::Inconsistency;
+                return ProcessResult::Inconsistency;
             }
 
-            itch::MessageClassification const classification = itch::classifyMessage(payload);
+            return ProcessResult::Ok;
+        }
+
+        ProcessResult processLiveMessage(std::span<std::byte const> payload) noexcept
+        {
+            auto classification = itch::classifyMessage(payload);
+
             switch (classification)
             {
                 case itch::MessageClassification::Order:
                 {
-                    return StartupResult::Inconsistency;
-                }
-                case itch::MessageClassification::StockDirectory:
-                {
-                    if (!handleStockDirectory(payload))
-                    {
-                        return StartupResult::Inconsistency;
-                    }
-                    return StartupResult::Ok;
-                }
-                case itch::MessageClassification::StockTradingAction:
-                {
-                    if (!handleStockTradingAction(payload))
-                    {
-                        return StartupResult::Inconsistency;
-                    }
-                    return StartupResult::Ok;
+                    return handleOrderMessage(payload);
                 }
                 case itch::MessageClassification::SystemEvent:
                 {
-                    StartupResult result = StartupResult::Inconsistency;
-                    struct Listener
+                    if (parseSystemEvent(payload) == ItchSystemEvent::EndOfMarket)
                     {
-                        StartupResult& result;
-                        void startOfMessages(itch::events::StartOfMessages) const
-                        {
-                            result = StartupResult::Inconsistency;
-                        }
-                        void startOfSystem(itch::events::StartOfSystem) const
-                        {
-                            result = StartupResult::PreMarketEvent;
-                        }
-                        void startOfMarket(itch::events::StartOfMarket) const
-                        {
-                            result = StartupResult::Inconsistency;
-                        }
-                        void endOfMarket(itch::events::EndOfMarket) const
-                        {
-                            result = StartupResult::Inconsistency;
-                        }
-                        void endOfSystem(itch::events::EndOfSystem) const
-                        {
-                            result = StartupResult::Inconsistency;
-                        }
-                        void endOfMessages(itch::events::EndOfMessages) const
-                        {
-                            result = StartupResult::Inconsistency;
-                        }
-                    };
-
-                    Listener listener {result};
-                    itch::parseSystemEventMessage<Listener>(payload, listener);
-                    return result;
-                }
-                case itch::MessageClassification::Ignored:
-                {
-                    break;
-                }
-            }
-
-            return StartupResult::Ok;
-        }
-
-        PreMarketResult processPreMarketMessage(std::span<std::byte const> payload) noexcept
-        {
-            if (payload.size() < itch::SYSTEM_EVENT_MESSAGE_SIZE) [[unlikely]]
-            {
-                return PreMarketResult::Inconsistency;
-            }
-
-            itch::MessageClassification const classification = itch::classifyMessage(payload);
-            switch (classification)
-            {
-                case itch::MessageClassification::Order:
-                case itch::MessageClassification::StockDirectory:
-                {
-                    return PreMarketResult::Inconsistency;
+                        return ProcessResult::EndOfDayEvent;
+                    }
+                    return ProcessResult::Inconsistency;
                 }
                 case itch::MessageClassification::StockTradingAction:
                 {
                     if (!handleStockTradingAction(payload)) [[unlikely]]
                     {
-                        return PreMarketResult::Inconsistency;
+                        return ProcessResult::Inconsistency;
                     }
-                    return PreMarketResult::Ok;
+                    return ProcessResult::Ok;
                 }
-                case itch::MessageClassification::SystemEvent:
+                case itch::MessageClassification::StockDirectory:
                 {
-                    PreMarketResult result = PreMarketResult::Inconsistency;
-                    struct Listener
-                    {
-                        PreMarketResult& result;
-                        void startOfMessages(itch::events::StartOfMessages) const
-                        {
-                            result = PreMarketResult::Inconsistency;
-                        }
-                        void startOfSystem(itch::events::StartOfSystem) const
-                        {
-                            result = PreMarketResult::Inconsistency;
-                        }
-                        void startOfMarket(itch::events::StartOfMarket) const
-                        {
-                            result = PreMarketResult::LiveEvent;
-                        }
-                        void endOfMarket(itch::events::EndOfMarket) const
-                        {
-                            result = PreMarketResult::Inconsistency;
-                        }
-                        void endOfSystem(itch::events::EndOfSystem) const
-                        {
-                            result = PreMarketResult::Inconsistency;
-                        }
-                        void endOfMessages(itch::events::EndOfMessages) const
-                        {
-                            result = PreMarketResult::Inconsistency;
-                        }
-                    };
-
-                    Listener listener {result};
-                    itch::parseSystemEventMessage<Listener>(payload, listener);
-                    return result;
+                    return ProcessResult::Inconsistency;
                 }
                 case itch::MessageClassification::Ignored:
                 {
-                    return PreMarketResult::Ok;
+                    return ProcessResult::Ok;
                 }
             }
 
-            return PreMarketResult::Inconsistency;
+            return ProcessResult::Ok;
         }
-
-        ProcessResult processLiveMessage(std::span<std::byte const> payload) noexcept;
         static void gapRecovery() noexcept
         {
             // For now: no action needed

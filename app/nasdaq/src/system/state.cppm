@@ -24,6 +24,10 @@ namespace alpdaq
 
         Live,
 
+        AfterMarket,
+
+        AfterSystemHours,
+
         Recovery,
 
         EndOfDay,
@@ -66,6 +70,7 @@ namespace alpdaq
         t.logGapRecovery();
         t.logTotalRecovery();
         t.logRecoveryComplete();
+        t.logInconsistency();
         t.logForceRestart();
         t.logFatalInconsistency();
         t.logSessionChange(id);
