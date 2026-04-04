@@ -19,6 +19,9 @@ namespace alpdaq
         /// events.
         Startup,
 
+        /// Phase between start of system hours and start of market hours.
+        PreMarket,
+
         Live,
 
         Recovery,
@@ -59,6 +62,7 @@ namespace alpdaq
 
     export template<typename T>
     concept SystemLogger = requires(T& t, SessionId id) {
+        t.logPreMarket();
         t.logGapRecovery();
         t.logTotalRecovery();
         t.logRecoveryComplete();

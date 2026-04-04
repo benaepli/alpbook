@@ -25,6 +25,7 @@ namespace alpdaq::system
                                          nasdaq::ReplaceOrder replaceMsg,
                                          itch::TradingState tradingState) {
         { container.init(tickers) } -> std::same_as<void>;
+        { container.onPreMarket() } -> std::same_as<void>;
         { container.onStockDirectory(assetId, ticker) } -> std::same_as<void>;
 
         { container.add(assetId, addMsg) } -> std::same_as<void>;

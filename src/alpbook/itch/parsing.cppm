@@ -38,6 +38,7 @@ namespace alpbook::itch
     export inline constexpr size_t PARSE_ID_SIZE = 3;
     export inline constexpr size_t SYSTEM_EVENT_MESSAGE_SIZE = 12;
     export inline constexpr size_t STOCK_TRADING_ACTION_MESSAGE_SIZE = 20;
+    export inline constexpr size_t STOCK_DIRECTORY_MESSAGE_SIZE = 39;
 
     template<typename T>
         requires std::is_integral_v<T>
@@ -114,15 +115,20 @@ namespace alpbook::itch
         }
     }
 
-    /// Parse an ITCH stock trading action message into the struct representation.
-    export ALPBOOK_INLINE std::optional<StockTradingAction> parseStockTradingActionMessage(
+    /// Parse an ITCH stock directory message into the struct representation.
+    export ALPBOOK_INLINE StockDirectory parseStockDirectoryMessage(
         std::span<std::byte const> bytes) noexcept
     {
-        if (std::to_integer<char>(bytes[0]) != 'H')
-        {
-            return std::nullopt;
-        }
+        StockTicker stock;
+        std::memcpy(stock.data(), bytes.data() + 11, STOCK_TICKER_LEN);
+        bool const authenticity = std::to_integer<char>(bytes[29]) == 'P';
+        return StockDirectory {.stock = stock, .authenticity = authenticity};
+    }
 
+    /// Parse an ITCH stock trading action message into the struct representation.
+    export ALPBOOK_INLINE StockTradingAction
+    parseStockTradingActionMessage(std::span<std::byte const> bytes) noexcept
+    {
         char const stateCode = std::to_integer<char>(bytes[19]);
         switch (stateCode)
         {
@@ -144,7 +150,7 @@ namespace alpbook::itch
             }
             default:
             {
-                return std::nullopt;
+                std::terminate();
             }
         }
     }

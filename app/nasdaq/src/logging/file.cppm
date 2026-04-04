@@ -18,6 +18,9 @@ import alpdaq.system.state;
 
 namespace alpdaq::logging
 {
+    export struct PreMarketStarted
+    {
+    };
     export struct GapRecoveryStarted
     {
     };
@@ -47,7 +50,8 @@ namespace alpdaq::logging
     {
     };
 
-    export using SystemData = std::variant<GapRecoveryStarted,
+    export using SystemData = std::variant<PreMarketStarted,
+                                           GapRecoveryStarted,
                                            TotalRecoveryStarted,
                                            RecoveryCompleted,
                                            ForceRestartTriggered,
@@ -77,6 +81,8 @@ namespace alpdaq::logging
         auto tag = levelTag(msg.level);
         std::visit(
             Overloaded {
+                [&](PreMarketStarted const&)
+                { std::print(os, "[{}] pre-market started\n", tag); },
                 [&](GapRecoveryStarted const&)
                 { std::print(os, "[{}] gap recovery started\n", tag); },
                 [&](TotalRecoveryStarted const&)
@@ -157,6 +163,11 @@ namespace alpdaq::logging
         explicit SystemFileLogger(std::shared_ptr<Logger<FileOutput<OnFailure>, SystemData>> logger)
             : logger_(std::move(logger))
         {
+        }
+
+        void logPreMarket()
+        {
+            logger_->tryEnqueueUnchecked({Level::Info, PreMarketStarted {}});
         }
 
         void logGapRecovery()
