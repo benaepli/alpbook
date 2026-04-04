@@ -168,8 +168,28 @@ namespace alpdaq::system::container
 
         ~Strategized() { clearAll(); }
 
-        Strategized(Strategized&&) = delete;
-        Strategized& operator=(Strategized&&) = delete;
+        Strategized(Strategized&& other) noexcept
+            : factory_(std::move(other.factory_))
+            , subscribed_(std::move(other.subscribed_))
+            , storage_(std::move(other.storage_))
+            , contexts_(other.contexts_)
+        {
+            other.contexts_.fill(nullptr);
+        }
+
+        Strategized& operator=(Strategized&& other) noexcept
+        {
+            if (this != &other)
+            {
+                clearAll();
+                factory_ = std::move(other.factory_);
+                subscribed_ = std::move(other.subscribed_);
+                storage_ = std::move(other.storage_);
+                contexts_ = other.contexts_;
+                other.contexts_.fill(nullptr);
+            }
+            return *this;
+        }
 
         Strategized(Strategized const&) = delete;
         Strategized& operator=(Strategized const&) = delete;

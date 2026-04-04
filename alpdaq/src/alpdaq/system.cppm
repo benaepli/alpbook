@@ -31,14 +31,13 @@ namespace alpdaq
     export template<typename T>
     concept ItchSource = requires(T t) {
         t.poll([](ItchView const&) {}, [](SourceEvent const&) {});
-        noexcept(t.poll());
 
         /// Force restarting must not block.
         t.forceRestart();
         noexcept(t.forceRestart());
     };
 
-    template<SystemLogger Logger>
+    export template<SystemLogger Logger>
     struct SystemConfig
     {
         std::shared_ptr<Logger> logger;

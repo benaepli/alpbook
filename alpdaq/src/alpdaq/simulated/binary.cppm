@@ -45,11 +45,8 @@ namespace alpdaq::simulated
             auto result = stream_.next();
             if (!result)
             {
-                if (result.error() == alpbook::itch::StreamStatus::ReadError) [[unlikely]]
-                {
-                    failed_ = true;
-                    onEvent(SourceEvent {FatalError {}});
-                }
+                failed_ = true;
+                onEvent(SourceEvent {FatalError {}});
                 return;
             }
 

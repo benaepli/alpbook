@@ -1,238 +1,109 @@
-import alpbook_latency.strategy;
-import alpbook.itch;
-import alpbook_latency.sink;
-import alpbook.dispatch;
+import benchmark.logger;
+import benchmark.source;
+import benchmark.strategy;
+import alpdaq.system;
+import alpdaq.system.state;
+import alpdaq.system.container.strategized;
+import alpdaq.simulated.binary;
+import alpbook.itch.messages;
+import alpbook.book;
 
+#include <algorithm>
+#include <array>
 #include <atomic>
-#include <chrono>
 #include <csignal>
-#include <cstdlib>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
-#include <thread>
-#include <immintrin.h>
+#include <vector>
 
-import alpbook_latency.strategy;
-import alpbook.itch;
-import alpbook.internal.backoff;
-import alpbook_latency.sink;
-import alpbook.dispatch;
-import alpbook.itch.reader;
-import alpbook.internal.pin;
-
-// Global flag to control execution state
-std::atomic<bool> Running {true};
-
-// Signal handler to capture Ctrl+C
-void signal_handler(int)
+namespace
 {
-    Running = false;
-}
+    using Container = alpdaq::system::container::Strategized<alpbook::nasdaq::PolicyHash,
+                                                             benchmark::BenchmarkStrategy,
+                                                             benchmark::BenchmarkStrategyFactory>;
 
-// Parse thread count from command-line arguments
-int parseThreadCount(int argc, char** argv)
-{
-    int threadCount = 1;  // default
-    for (int i = 3; i < argc; i++)
+    using BenchmarkSystem = alpdaq::System<benchmark::BenchmarkSource,
+                                           benchmark::BenchmarkLogger,
+                                           Container>;
+
+    std::atomic<BenchmarkSystem*> g_system {nullptr};
+
+    void signalHandler(int)
     {
-        if (std::string(argv[i]) == "--threads" && i + 1 < argc)
+        if (auto* sys = g_system.load(std::memory_order_relaxed))
         {
-            threadCount = std::atoi(argv[i + 1]);
-            break;
+            sys->stop();
         }
     }
-    return std::max(0, threadCount);
-}
 
-// Type trait to detect synchronous dispatcher
-template<typename T>
-struct IsSynchronous : std::false_type
-{
-};
-
-template<typename Slot, typename F, typename E, typename M>
-struct IsSynchronous<alpbook::Dispatcher<Slot, F, E, M, alpbook::SynchronousDispatch>>
-    : std::true_type
-{
-};
-
-template<typename T>
-inline constexpr bool IsSynchronous_v = IsSynchronous<T>::value;
-
-// Template function to run benchmark with either dispatcher type
-template<typename DispatcherType>
-int runBenchmark(std::string const& inputFile,
-                 std::string const& outputFile,
-                 alpbook_latency::BenchmarkData& sharedData,
-                 alpbook_latency::BenchmarkSinkFactory& sinkFactory,
-                 alpbook::itch::ArrayMapper<>& mapper,
-                 uint32_t threadCount)
-{
-    try
+    alpbook::itch::StockTicker parseTicker(char const* str)
     {
-        DispatcherType dispatcher {mapper, sinkFactory};
-
-        auto initResult = dispatcher.init(threadCount);
-        if (!initResult.has_value())
-        {
-            std::cerr << "Failed to init dispatcher (pinning error?)\n";
-            return 1;
-        }
-        uint32_t dispatcherCores = *initResult;
-
-        // Pin main thread to a core that doesn't conflict with worker threads.
-        // Use modulo to wrap around if needed (e.g., 4 % 8 = 4).
-        auto mainPinner = alpbook::internal::Pinner::create();
-        if (!mainPinner.has_value())
-        {
-            std::cerr << "Warning: Failed to initialize thread pinning for main thread.\n";
-            std::cerr << "         Benchmark results may be unreliable.\n";
-        }
-        else
-        {
-            auto totalCores = (*mainPinner)->getCoreCount();
-            if (!totalCores.has_value() || *totalCores == 0)
-            {
-                std::cerr << "Warning: Failed to query system core count.\n";
-            }
-            else
-            {
-                uint32_t mainCore = dispatcherCores % (*totalCores);
-                auto pinResult = (*mainPinner)->pinToCore(mainCore);
-                if (!pinResult.has_value())
-                {
-                    std::cerr << "Warning: Failed to pin main thread to core " << mainCore << ".\n";
-                    std::cerr << "         Thread may migrate during execution.\n";
-                }
-                else
-                {
-                    std::cout << "Main thread pinned to core " << mainCore
-                              << " (dispatcher uses cores 0-" << (dispatcherCores - 1) << ").\n";
-                }
-            }
-        }
-
-        std::cout << "Dispatcher initialized. Starting playback... (Ctrl+C to stop early)\n";
-
-        auto stream = alpbook::itch::ItchStream<true>::open(inputFile);
-        if (!stream.has_value())
-        {
-            std::cerr << "Error opening ITCH file: " << stream.error() << "\n";
-            return 1;
-        }
-
-        constexpr int64_t TargetWaitNs = 1000;
-        int64_t cyclesPerWait = 0;
-        alpbook::internal::Backoff<0, 100000> backoff;
-
-        while (Running)
-        {
-            auto msg = stream->next();
-            if (!msg.has_value())
-            {
-                if (msg.error() == alpbook::itch::StreamStatus::ReadError)
-                {
-                    std::cerr << "Read error in ITCH stream\n";
-                }
-                break;
-            }
-
-            auto& slot = *msg;
-
-            if constexpr (!IsSynchronous_v<DispatcherType>)
-            {
-                if (cyclesPerWait == 0) [[unlikely]]
-                {
-                    int64_t startTsc = sharedData.clock.rdtsc();
-                    int64_t startNs = sharedData.clock.tsc2ns(startTsc);
-
-                    while (sharedData.clock.tsc2ns(sharedData.clock.rdtsc()) - startNs
-                           < TargetWaitNs)
-                    {
-                        _mm_pause();
-                    }
-                    cyclesPerWait = sharedData.clock.rdtsc() - startTsc;
-                }
-
-                int64_t loopStart = sharedData.clock.rdtsc();
-                while ((sharedData.clock.rdtsc() - loopStart) < cyclesPerWait)
-                {
-                    backoff.pause();
-                }
-                backoff.reset();
-            }
-
-            slot.dispatchTimestamp = sharedData.clock.rdtsc();
-            dispatcher.dispatch(slot);
-        }
-
-        std::cout << "Playback complete.\n";
+        alpbook::itch::StockTicker ticker {};
+        ticker.fill(' ');
+        auto len = std::min(std::strlen(str), alpbook::itch::STOCK_TICKER_LEN);
+        std::copy_n(str, len, ticker.begin());
+        return ticker;
     }
-    catch (std::exception const& e)
-    {
-        std::cerr << "\nUnexpected error: " << e.what() << "\n";
-        return 1;
-    }
-
-    std::cout << "Waiting for queues to drain and threads to join...\n";
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    std::cout << "Saving results to " << outputFile << "...\n";
-    sharedData.saveToCSV(outputFile);
-
-    return 0;
-}
+}  // namespace
 
 int main(int argc, char** argv)
 {
-    std::signal(SIGINT, signal_handler);
-
     if (argc < 3)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_itch.gz> <output.csv> [--threads N]\n";
-        std::cerr << "  --threads 0 or 1: Synchronous mode (no waiting)\n";
-        std::cerr << "  --threads N > 1:  Async mode with N worker threads (1000ns wait)\n";
-        std::cerr << "  Default: --threads 4\n";
+        std::cerr << "Usage: " << argv[0] << " <itch_file> <output.csv> [tickers...]\n";
         return 1;
     }
 
-    std::string inputFile = argv[1];
+    std::filesystem::path inputFile = argv[1];
     std::string outputFile = argv[2];
-    int threadCount = parseThreadCount(argc, argv);
 
-    // Setup shared objects
-    alpbook_latency::BenchmarkData sharedData {};
-    alpbook_latency::BenchmarkStrategyFactory factory(sharedData);
-    alpbook_latency::BenchmarkSinkFactory sinkFactory(factory);
-    alpbook::itch::ArrayMapper<> mapper {};
-    for (uint16_t i = 1; i <= 100; i++)
+    std::vector<alpbook::itch::StockTicker> stocks;
+    for (int i = 3; i < argc; ++i)
     {
-        mapper.assign(i);
+        stocks.push_back(parseTicker(argv[i]));
     }
 
-    using BenchSlot = alpbook::itch::ItchSlot<true>;
-    using AsyncDispatcher = alpbook::Dispatcher<BenchSlot,
-                                                alpbook_latency::BenchmarkSinkFactory,
-                                                alpbook::itch::ItchExtractor,
-                                                decltype(mapper)>;
-    using SyncDispatcher = alpbook::Dispatcher<BenchSlot,
-                                               alpbook_latency::BenchmarkSinkFactory,
-                                               alpbook::itch::ItchExtractor,
-                                               decltype(mapper),
-                                               alpbook::SynchronousDispatch>;
+    auto logger = std::make_shared<benchmark::BenchmarkLogger>();
 
-    // Branch based on mode
-    if (threadCount <= 1)
+    alpdaq::SessionId session {};
+    auto sourceResult = alpdaq::simulated::BinaryItchSource::open(inputFile, session);
+    if (!sourceResult)
     {
-        std::cout << "Running in synchronous mode (no waiting, single-threaded)\n";
-        return runBenchmark<SyncDispatcher>(
-            inputFile, outputFile, sharedData, sinkFactory, mapper, 1);
+        std::cerr << "Failed to open ITCH file: " << inputFile << "\n";
+        return 1;
     }
-    else
+
+    benchmark::BenchmarkSource source(std::move(*sourceResult), logger);
+
+    benchmark::BenchmarkStrategyFactory factory(logger);
+    Container container(factory);
+
+    alpdaq::SystemConfig<benchmark::BenchmarkLogger> config {
+        .logger = logger,
+        .stocks = std::move(stocks),
+    };
+
+    BenchmarkSystem system(std::move(source), std::move(config), std::move(container));
+    g_system.store(&system, std::memory_order_relaxed);
+    std::signal(SIGINT, signalHandler);
+
+    std::cout << "Starting latency benchmark...\n";
+
+    auto result = system.run();
+
+    g_system.store(nullptr, std::memory_order_relaxed);
+
+    if (!result)
     {
-        std::cout << "Running in async mode (" << threadCount
-                  << " threads, 1000ns message spacing)\n";
-        return runBenchmark<AsyncDispatcher>(
-            inputFile, outputFile, sharedData, sinkFactory, mapper, threadCount);
+        std::cout << "Replay complete.\n";
     }
+
+    std::cout << "Saving results to " << outputFile << "...\n";
+    logger->saveToCSV(outputFile);
+
+    return 0;
 }
