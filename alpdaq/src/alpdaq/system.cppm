@@ -157,48 +157,32 @@ namespace alpdaq
                 switch (state_)
                 {
                     case SystemState::Waiting:
-                        state_ = runWaiting();
+                        state_ = recovery_ ? runWaiting<true>() : runWaiting<false>();
                         break;
                     case SystemState::Startup:
-                    {
-                        state_ = runStartup();
+                        state_ = recovery_ ? runStartup<true>() : runStartup<false>();
                         break;
-                    }
                     case SystemState::PreMarket:
-                    {
-                        state_ = runPreMarket();
+                        state_ = recovery_ ? runPreMarket<true>() : runPreMarket<false>();
                         break;
-                    }
                     case SystemState::Live:
-                    {
-                        state_ = runLive();
+                        state_ = recovery_ ? runLive<true>() : runLive<false>();
                         break;
-                    }
                     case SystemState::AfterMarket:
-                    {
-                        state_ = runAfterMarket();
+                        state_ = recovery_ ? runAfterMarket<true>() : runAfterMarket<false>();
                         break;
-                    }
                     case SystemState::AfterSystemHours:
-                    {
-                        state_ = runAfterSystemHours();
+                        state_ = recovery_ ? runAfterSystemHours<true>()
+                                           : runAfterSystemHours<false>();
                         break;
-                    }
-                    case SystemState::Recovery:
-                    {
-                        state_ = runRecovery();
-                        break;
-                    }
                     case SystemState::EndOfDay:
-                    {
                         state_ = runEndOfDay();
                         break;
-                    }
                     case SystemState::Terminate:
-                    {
                         config_.logger->rotateSession();
                         return std::unexpected(SystemError::FatalError);
-                    }
+                    case SystemState::RecoveryDone:
+                        __builtin_unreachable();
                 }
             }
             return {};
@@ -211,7 +195,8 @@ namespace alpdaq
             clearOrderBooks();
             config_.logger->logForceRestart();
             source_.forceRestart();
-            return SystemState::Recovery;
+            recovery_ = true;
+            return SystemState::Waiting;
         }
 
         template<typename DataHandler, typename EventHandler>
@@ -230,9 +215,14 @@ namespace alpdaq
                 source_.poll(handleData, handleEvent);
             }
 
+            if (nextState == SystemState::RecoveryDone)
+            {
+                return currentState;
+            }
             return nextState;
         }
 
+        template<bool Recovery>
         SystemState runAwaitingSystemEvent(SystemState currentState,
                                            ItchSystemEvent expectedEvent,
                                            SystemState successState) noexcept
@@ -256,9 +246,10 @@ namespace alpdaq
                     }
                 },
                 [this](SourceEvent const& event, SystemState& nextState)
-                { normalEventHandler(event, nextState); });
+                { normalEventHandler<Recovery>(event, nextState); });
         }
 
+        template<bool Recovery>
         SystemState runWaiting() noexcept
         {
             return runStateLoop(
@@ -295,12 +286,20 @@ namespace alpdaq
                             [this, &nextState](GapRecovery const&)
                             {
                                 config_.logger->logGapRecovery();
-                                nextState = SystemState::Recovery;
+                                if constexpr (!Recovery)
+                                {
+                                    gapRecovery();
+                                    recovery_ = true;
+                                    nextState = SystemState::RecoveryDone;
+                                }
                             },
                             [this, &nextState](TotalRecovery const&)
                             {
                                 config_.logger->logTotalRecovery();
-                                nextState = SystemState::Recovery;
+                                clearOrderBooks();
+                                source_.forceRestart();
+                                recovery_ = true;
+                                nextState = SystemState::Waiting;
                             },
                             [this](SessionChanged const& e)
                             { config_.logger->logSessionChange(e.newSession); },
@@ -314,13 +313,15 @@ namespace alpdaq
                                 clearOrderBooks();
                                 config_.logger->logForceRestart();
                                 source_.forceRestart();
-                                nextState = SystemState::Recovery;
+                                recovery_ = true;
+                                nextState = SystemState::Waiting;
                             },
                         },
                         event);
                 });
         }
 
+        template<bool Recovery>
         SystemState runStartup() noexcept
         {
             return runStateLoop(
@@ -378,9 +379,10 @@ namespace alpdaq
                     }
                 },
                 [this](SourceEvent const& event, SystemState& nextState)
-                { normalEventHandler(event, nextState); });
+                { normalEventHandler<Recovery>(event, nextState); });
         }
 
+        template<bool Recovery>
         SystemState runPreMarket() noexcept
         {
             return runStateLoop(
@@ -408,7 +410,10 @@ namespace alpdaq
                         {
                             if (parseSystemEvent(payload) == ItchSystemEvent::StartOfMarket)
                             {
-                                container_.resumeTrading();
+                                if constexpr (!Recovery)
+                                {
+                                    container_.resumeTrading();
+                                }
                                 nextState = SystemState::Live;
                             }
                             else
@@ -430,9 +435,10 @@ namespace alpdaq
                     }
                 },
                 [this](SourceEvent const& event, SystemState& nextState)
-                { normalEventHandler(event, nextState); });
+                { normalEventHandler<Recovery>(event, nextState); });
         }
 
+        template<bool Recovery>
         SystemState runLive() noexcept
         {
             return runStateLoop(
@@ -440,66 +446,23 @@ namespace alpdaq
                 [this](std::span<std::byte const> payload, SystemState& nextState)
                 { normalDataHandler(payload, nextState); },
                 [this](SourceEvent const& event, SystemState& nextState)
-                { normalEventHandler(event, nextState); });
+                { normalEventHandler<Recovery>(event, nextState); });
         }
 
+        template<bool Recovery>
         SystemState runAfterMarket() noexcept
         {
-            return runAwaitingSystemEvent(SystemState::AfterMarket,
-                                          ItchSystemEvent::EndOfSystem,
-                                          SystemState::AfterSystemHours);
+            return runAwaitingSystemEvent<Recovery>(SystemState::AfterMarket,
+                                                    ItchSystemEvent::EndOfSystem,
+                                                    SystemState::AfterSystemHours);
         }
 
+        template<bool Recovery>
         SystemState runAfterSystemHours() noexcept
         {
-            return runAwaitingSystemEvent(SystemState::AfterSystemHours,
-                                          ItchSystemEvent::EndOfMessages,
-                                          SystemState::EndOfDay);
-        }
-
-        SystemState runRecovery() noexcept
-        {
-            return runStateLoop(
-                SystemState::Recovery,
-                [this](std::span<std::byte const> payload, SystemState& nextState)
-                { normalDataHandler(payload, nextState); },
-                [this](SourceEvent const& event, SystemState& nextState)
-                {
-                    std::visit(
-                        Overloaded {
-                            [this, &nextState](RecoveryComplete const&)
-                            {
-                                config_.logger->logRecoveryComplete();
-                                container_.resumeTrading();
-                                nextState = SystemState::Live;
-                            },
-                            [this, &nextState](GapRecovery const&)
-                            {
-                                config_.logger->logGapRecovery();
-                                gapRecovery();
-                                nextState = SystemState::Recovery;
-                            },
-                            [this, &nextState](TotalRecovery const&)
-                            {
-                                config_.logger->logTotalRecovery();
-                                clearOrderBooks();
-                                nextState = SystemState::Recovery;
-                            },
-                            [this, &nextState](FatalError const&)
-                            {
-                                clearOrderBooks();
-                                nextState = SystemState::Terminate;
-                            },
-                            [this, &nextState](auto const&)
-                            {
-                                clearOrderBooks();
-                                config_.logger->logForceRestart();
-                                source_.forceRestart();
-                                nextState = SystemState::Recovery;
-                            },
-                        },
-                        event);
-                });
+            return runAwaitingSystemEvent<Recovery>(SystemState::AfterSystemHours,
+                                                    ItchSystemEvent::EndOfMessages,
+                                                    SystemState::EndOfDay);
         }
 
         SystemState runEndOfDay() noexcept
@@ -524,6 +487,7 @@ namespace alpdaq
             }
         }
 
+        template<bool Recovery>
         void normalEventHandler(SourceEvent const& event, SystemState& nextState) noexcept
         {
             std::visit(
@@ -531,14 +495,38 @@ namespace alpdaq
                     [this, &nextState](GapRecovery const&)
                     {
                         config_.logger->logGapRecovery();
-                        gapRecovery();
-                        nextState = SystemState::Recovery;
+                        if constexpr (!Recovery)
+                        {
+                            gapRecovery();
+                            recovery_ = true;
+                            nextState = SystemState::RecoveryDone;
+                        }
                     },
                     [this, &nextState](TotalRecovery const&)
                     {
                         config_.logger->logTotalRecovery();
                         clearOrderBooks();
-                        nextState = SystemState::Recovery;
+                        source_.forceRestart();
+                        recovery_ = true;
+                        nextState = SystemState::Waiting;
+                    },
+                    [this, &nextState](RecoveryComplete const&)
+                    {
+                        if constexpr (Recovery)
+                        {
+                            config_.logger->logRecoveryComplete();
+                            container_.resumeTrading();
+                            recovery_ = false;
+                            nextState = SystemState::RecoveryDone;
+                        }
+                        else
+                        {
+                            clearOrderBooks();
+                            config_.logger->logForceRestart();
+                            source_.forceRestart();
+                            recovery_ = true;
+                            nextState = SystemState::Waiting;
+                        }
                     },
                     [this, &nextState](FatalError const&)
                     {
@@ -550,7 +538,8 @@ namespace alpdaq
                         clearOrderBooks();
                         config_.logger->logForceRestart();
                         source_.forceRestart();
-                        nextState = SystemState::Recovery;
+                        recovery_ = true;
+                        nextState = SystemState::Waiting;
                     },
                 },
                 event);
@@ -687,6 +676,7 @@ namespace alpdaq
 
         SystemConfig<Logger> config_;
         SystemState state_ = SystemState::Waiting;
+        bool recovery_ = false;
 
         Container container_;
         DayState dayState_;

@@ -28,13 +28,15 @@ namespace alpdaq
 
         AfterSystemHours,
 
-        Recovery,
-
         EndOfDay,
 
         /// Terminate immediately flushes all logs and attempts to shut down.
         /// This happens upon an irrecoverable I/O error.
         Terminate,
+
+        /// Sentinel: recovery status changed, re-dispatch the current state.
+        /// Never escapes the inner runStateLoop.
+        RecoveryDone,
     };
 
     export using SessionId = std::array<uint8_t, 10>;
