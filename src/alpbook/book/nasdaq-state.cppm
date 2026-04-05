@@ -13,10 +13,10 @@ module;
 
 #include "alpbook/internal/hints.hpp"
 
+export module alpbook.book.nasdaq:state;
+
 import alpbook.common;
 import alpbook.internal.pool;
-
-export module alpbook.book.nasdaq:state;
 
 namespace alpbook::nasdaq
 {

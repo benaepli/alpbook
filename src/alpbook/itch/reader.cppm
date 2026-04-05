@@ -1,64 +1,106 @@
 module;
 
 #include <bit>
-#include <concepts>
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <string>
 
 #include "zlib.h"
 
-import alpbook.book.nasdaq;
-import alpbook.itch.parsing;
-
 export module alpbook.itch.reader;
+
+import alpbook.itch.parsing;
 
 namespace alpbook::itch
 {
-    template<typename H, bool B>
-    concept DirectHandler = requires(H h, ItchSlot<B>& slot) {
-        { h.handle(slot) } -> std::same_as<void>;
+    export enum class StreamStatus : uint8_t
+    {
+        EndOfFile,
+        ReadError
     };
 
-    export template<typename H, bool B>
-        requires DirectHandler<H, B>
-    std::expected<void, std::string> readGzippedItch(std::filesystem::path const& path, H& handler)
+    export template<bool Benchmark = false>
+    class ItchStream
     {
-        gzFile file = gzopen(path.c_str(), "rb");
-        if (!file)
+      public:
+        static std::expected<ItchStream, StreamStatus> open(std::filesystem::path const& path)
         {
-            return std::unexpected("Failed to open GZIP file: " + path.string());
-        }
-        ItchSlot<B> slot;
-        slot.type = MessageOrigin::Live;
-
-        uint16_t msgLenBigEndian = 0;
-
-        while (true)
-        {
-            // Read the 2-byte length prefix (standard ITCH file format)
-            int bytesRead = gzread(file, &msgLenBigEndian, sizeof(msgLenBigEndian));
-            if (bytesRead < static_cast<int>(sizeof(msgLenBigEndian)))
+            gzFile file = gzopen(path.c_str(), "rb");
+            if (!file)
             {
-                break;
+                return std::unexpected(StreamStatus::ReadError);
             }
-            uint16_t msgLen = std::byteswap(msgLenBigEndian);
-            // We only read what fits in our fixed 55-byte buffer
-            uint16_t bytesToRead = std::min(static_cast<size_t>(msgLen), slot.data.size());
-            bytesRead = gzread(file, slot.data.data(), bytesToRead);
+            return ItchStream(file);
+        }
+
+        std::expected<std::reference_wrapper<ItchSlot<Benchmark>>, StreamStatus> next()
+        {
+            int bytesRead = gzread(file_, &msgLenBigEndian_, sizeof(msgLenBigEndian_));
+            if (bytesRead < static_cast<int>(sizeof(msgLenBigEndian_)))
+            {
+                return std::unexpected(StreamStatus::EndOfFile);
+            }
+
+            uint16_t msgLen = std::byteswap(msgLenBigEndian_);
+            uint16_t bytesToRead = std::min(static_cast<size_t>(msgLen), slot_.data.size());
+            bytesRead = gzread(file_, slot_.data.data(), bytesToRead);
             if (bytesRead < bytesToRead)
             {
-                break;
+                return std::unexpected(StreamStatus::ReadError);
             }
 
             if (msgLen > bytesToRead)
             {
-                gzseek(file, msgLen - bytesToRead, SEEK_CUR);
+                gzseek(file_, msgLen - bytesToRead, SEEK_CUR);
             }
-            handler.handle(slot);
+
+            return slot_;
         }
 
-        gzclose(file);
-        return {};
-    }
+        ItchStream(ItchStream const&) = delete;
+        ItchStream& operator=(ItchStream const&) = delete;
+
+        ItchStream(ItchStream&& other) noexcept
+            : file_(other.file_)
+            , slot_(other.slot_)
+            , msgLenBigEndian_(other.msgLenBigEndian_)
+        {
+            other.file_ = nullptr;
+        }
+
+        ItchStream& operator=(ItchStream&& other) noexcept
+        {
+            if (this != &other)
+            {
+                if (file_)
+                {
+                    gzclose(file_);
+                }
+                file_ = other.file_;
+                slot_ = other.slot_;
+                msgLenBigEndian_ = other.msgLenBigEndian_;
+                other.file_ = nullptr;
+            }
+            return *this;
+        }
+
+        ~ItchStream()
+        {
+            if (file_)
+            {
+                gzclose(file_);
+            }
+        }
+
+      private:
+        explicit ItchStream(gzFile file)
+            : file_(file)
+        {
+        }
+
+        gzFile file_ = nullptr;
+        ItchSlot<Benchmark> slot_ {};
+        uint16_t msgLenBigEndian_ = 0;
+    };
 }  // namespace alpbook::itch

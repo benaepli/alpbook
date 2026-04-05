@@ -9,6 +9,7 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 # Build options
 option(ALPBOOK_BUILD_TESTS "Build test programs" ON)
 option(ALPBOOK_BUILD_BENCHMARKS "Build benchmark programs" OFF)
+option(ALPBOOK_BUILD_APP "Build application binaries" OFF)
 option(ALPBOOK_BUILD_DOCS "Build Doxygen documentation" ON)
 
 include(FetchContent)
@@ -36,6 +37,35 @@ set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(absl)
 
 FetchContent_Declare(
+        tomlplusplus
+        GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+        GIT_TAG v3.4.0
+)
+FetchContent_MakeAvailable(tomlplusplus)
+
+FetchContent_Declare(
+        zlib
+        GIT_REPOSITORY https://github.com/madler/zlib.git
+        GIT_TAG v1.3.1
+)
+FetchContent_MakeAvailable(zlib)
+
+set(SPDLOG_USE_STD_FORMAT ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+        spdlog
+        GIT_REPOSITORY https://github.com/gabime/spdlog.git
+        GIT_TAG v1.17.0
+)
+FetchContent_MakeAvailable(spdlog)
+
+FetchContent_Declare(
+        readerwriterqueue
+        GIT_REPOSITORY https://github.com/cameron314/readerwriterqueue.git
+        GIT_TAG v1.0.6
+)
+FetchContent_MakeAvailable(readerwriterqueue)
+
+FetchContent_Declare(
         hwloc
         GIT_REPOSITORY https://github.com/open-mpi/hwloc.git
         GIT_TAG hwloc-2.12.0
@@ -44,21 +74,6 @@ FetchContent_Declare(
 set(HWLOC_SKIP_LSTOPO ON CACHE BOOL "Skip building lstopo")
 set(HWLOC_SKIP_TOOLS ON CACHE BOOL "Skip building hwloc tools")
 FetchContent_MakeAvailable(hwloc)
-
-FetchContent_Declare(
-        readerwriterqueue
-        GIT_REPOSITORY https://github.com/cameron314/readerwriterqueue
-        GIT_TAG v1.0.7
-        FIND_PACKAGE_ARGS
-)
-FetchContent_MakeAvailable(readerwriterqueue)
-
-FetchContent_Declare(
-        zlib
-        GIT_REPOSITORY https://github.com/madler/zlib.git
-        GIT_TAG v1.3.1
-)
-FetchContent_MakeAvailable(zlib)
 
 add_subdirectory(deps/BppTree)
 
@@ -75,20 +90,17 @@ target_sources(alpbook
         src/alpbook/book/nasdaq.cppm
         src/alpbook/book/nasdaq-state.cppm
         src/alpbook/common.cppm
-        src/alpbook/dispatch.cppm
         src/alpbook/internal.cppm
         src/alpbook/internal/backoff.cppm
-        src/alpbook/internal/pin.cppm
         src/alpbook/internal/pool.cppm
         src/alpbook/itch.cppm
-        src/alpbook/itch/dispatch.cppm
+        src/alpbook/itch/messages.cppm
         src/alpbook/itch/parsing.cppm
         src/alpbook/itch/parsing-listener.cppm
         src/alpbook/itch/reader.cppm
-        src/alpbook/sink/nasdaq.cppm
         src/alpbook/strategy.cppm
 )
-target_link_libraries(alpbook PRIVATE eve::eve absl::btree absl::flat_hash_map absl::numeric bpptree::bpptree hwloc readerwriterqueue zlibstatic)
+target_link_libraries(alpbook PRIVATE eve::eve absl::btree absl::flat_hash_map absl::numeric bpptree::bpptree zlibstatic)
 target_compile_features(alpbook PUBLIC cxx_std_23)
 
 if (ALPBOOK_BUILD_TESTS)
@@ -98,6 +110,11 @@ endif ()
 
 if (ALPBOOK_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
+endif ()
+
+if (ALPBOOK_BUILD_APP)
+    add_subdirectory(alpdaq)
+    add_subdirectory(app)
 endif ()
 
 if (ALPBOOK_BUILD_DOCS)

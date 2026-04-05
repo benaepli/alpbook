@@ -20,8 +20,6 @@ target_sources(alpbook_test
         PRIVATE
         src/internal/pool.cpp
         src/book/nasdaq.cpp
-        src/dispatch.cpp
-        src/sink/nasdaq.cpp
 )
 
 add_test(NAME alpbook_test COMMAND alpbook_test)

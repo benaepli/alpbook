@@ -1,8 +1,5 @@
 module;
 
-import alpbook.book.core;
-import alpbook.common;
-import alpbook.internal;
 
 #include <array>
 #include <cstdint>
@@ -15,6 +12,10 @@ import alpbook.internal;
 #include "alpbook/internal/hints.hpp"
 
 export module alpbook.book.nasdaq;
+
+import alpbook.book.core;
+import alpbook.common;
+import alpbook.internal;
 
 export import :state;
 namespace alpbook::nasdaq

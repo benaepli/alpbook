@@ -1,6 +1,6 @@
-\mainpage Alpmap Documentation
+\mainpage alpbook Documentation
 
-Welcome to the main documentation for Alpmap.
+Welcome to the main documentation for alpbook.
 
 This site contains both high-level project information and the detailed API reference.
 
