@@ -1,13 +1,3 @@
-import benchmark.logger;
-import benchmark.source;
-import benchmark.strategy;
-import alpdaq.system;
-import alpdaq.system.state;
-import alpdaq.system.container.strategized;
-import alpdaq.simulated.binary;
-import alpbook.itch.messages;
-import alpbook.book;
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -20,15 +10,25 @@ import alpbook.book;
 #include <string>
 #include <vector>
 
+import benchmark.logger;
+import benchmark.source;
+import benchmark.strategy;
+import alpdaq.system;
+import alpdaq.system.state;
+import alpdaq.system.container.strategized;
+import alpdaq.simulated.binary;
+import alpbook.itch.messages;
+import alpbook.book;
+import alpdaq.placement;
+
 namespace
 {
     using Container = alpdaq::system::container::Strategized<alpbook::nasdaq::PolicyHash,
                                                              benchmark::BenchmarkStrategy,
                                                              benchmark::BenchmarkStrategyFactory>;
 
-    using BenchmarkSystem = alpdaq::System<benchmark::BenchmarkSource,
-                                           benchmark::BenchmarkLogger,
-                                           Container>;
+    using BenchmarkSystem =
+        alpdaq::System<benchmark::BenchmarkSource, benchmark::BenchmarkLogger, Container>;
 
     std::atomic<BenchmarkSystem*> g_system {nullptr};
 
@@ -66,6 +66,16 @@ int main(int argc, char** argv)
     {
         stocks.push_back(parseTicker(argv[i]));
     }
+    auto pinnerResult = alpdaq::placement::Pinner::create();
+    if (!pinnerResult.has_value())
+    {
+        std::cerr << "Failed to initialize CPU pinner\n";
+        return 1;
+    }
+    auto pinner = std::move(*pinnerResult);
+    auto topology = pinner->getTopology();
+    auto& first = topology[0];
+    pinner->pinToPU(first.pus[0].osIndex);
 
     auto logger = std::make_shared<benchmark::BenchmarkLogger>();
 

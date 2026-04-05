@@ -18,7 +18,7 @@ namespace alpdaq::placement
         CoreDiscoveryError
     };
 
-    export enum class CoreType
+    export enum class CoreType : uint8_t
     {
         Performance,
         Efficiency,
@@ -83,7 +83,10 @@ namespace alpdaq::placement
             hwloc_bitmap_free(set);
             return {};
         }
-        std::span<PhysicalCore const> getTopology() const { return std::span(cores_); }
+        [[nodiscard]] std::span<PhysicalCore const> getTopology() const
+        {
+            return std::span(cores_);
+        }
 
       private:
         Pinner() = default;
@@ -130,7 +133,8 @@ namespace alpdaq::placement
                 return CoreType::Unknown;
             }
             int efficiency;
-            if (hwloc_cpukinds_get_info(topology_, kindIndex, NULL, &efficiency, NULL, NULL, 0)
+            if (hwloc_cpukinds_get_info(
+                    topology_, kindIndex, nullptr, &efficiency, nullptr, nullptr, 0)
                 != 0)
             {
                 return CoreType::Unknown;
@@ -142,7 +146,7 @@ namespace alpdaq::placement
             return CoreType::Performance;
         }
 
-        hwloc_topology_t topology_;
+        hwloc_topology_t topology_ = nullptr;
         std::vector<PhysicalCore> cores_;
     };
 }  // namespace alpdaq::placement

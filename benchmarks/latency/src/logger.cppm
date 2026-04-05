@@ -6,6 +6,7 @@ module;
 #include <utility>
 #include <vector>
 
+#include <emmintrin.h>
 #include <tscns.h>
 
 export module benchmark.logger;
@@ -19,9 +20,20 @@ namespace benchmark
       public:
         BenchmarkLogger() { clock_.init(); }
 
-        void recordDispatch() noexcept { pendingDispatch_ = clock_.rdtsc(); }
+        void recordDispatch() noexcept
+        {
+            _mm_lfence();
+            pendingDispatch_ = TSCNS::rdtsc();
+            _mm_lfence();
+        }
 
-        void recordStrategy() noexcept { samples_.emplace_back(pendingDispatch_, clock_.rdtsc()); }
+        void recordStrategy() noexcept
+        {
+            _mm_lfence();
+            auto recorded = TSCNS::rdtsc();
+            _mm_lfence();
+            samples_.emplace_back(pendingDispatch_, recorded);
+        }
 
         void saveToCSV(std::string const& path) const
         {
