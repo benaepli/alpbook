@@ -12,6 +12,7 @@ target_sources(alpdaq
         src/alpdaq/logging/logger.cppm
         src/alpdaq/logging/messages.cppm
         src/alpdaq/network.cppm
+        src/alpdaq/network/af_xdp.cppm
         src/alpdaq/placement.cppm
         src/alpdaq/simulated.cppm
         src/alpdaq/simulated/binary.cppm

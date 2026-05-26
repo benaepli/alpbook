@@ -1,6 +1,5 @@
 module;
 
-
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -21,27 +20,27 @@ namespace alpdaq::network
     /// and 2 bytes for the message count.
     export struct MoldItch
     {
-        std::span<std::byte> message;
+        std::span<std::byte const> message;
 
-        bool valid() const noexcept { return message.size() >= 20; }
+        [[nodiscard]] bool valid() const noexcept { return message.size() >= 20; }
 
-        std::array<uint8_t, 10> session() const noexcept
+        [[nodiscard]] std::array<uint8_t, 10> session() const noexcept
         {
-            std::array<uint8_t, 10> s;
+            std::array<uint8_t, 10> s {};
             std::memcpy(s.data(), message.data(), 10);
             return s;
         }
 
-        uint64_t sequenceNumber() const noexcept
+        [[nodiscard]] uint64_t sequenceNumber() const noexcept
         {
-            uint64_t val;
+            uint64_t val = 0;
             std::memcpy(&val, message.data() + 10, sizeof(val));
             return std::byteswap(val);
         }
 
-        uint16_t messageCount() const noexcept
+        [[nodiscard]] uint16_t messageCount() const noexcept
         {
-            std::uint16_t val;
+            std::uint16_t val = 0;
             std::memcpy(&val, message.data() + 18, sizeof(val));
             return std::byteswap(val);
         }
