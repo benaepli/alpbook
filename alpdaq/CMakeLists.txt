@@ -21,6 +21,7 @@ target_sources(alpdaq
         src/alpdaq/placement.cppm
         src/alpdaq/simulated.cppm
         src/alpdaq/simulated/binary.cppm
+        src/alpdaq/source.cppm
         src/alpdaq/system.cppm
         src/alpdaq/system/container.cppm
         src/alpdaq/system/container/container.cppm

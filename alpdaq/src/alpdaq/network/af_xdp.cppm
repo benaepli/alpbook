@@ -1,7 +1,9 @@
 module;
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -26,6 +28,7 @@ module;
 export module alpdaq.network.af_xdp;
 
 import alpdaq.system;
+import alpdaq.network;
 
 namespace alpdaq::network
 {
@@ -157,7 +160,84 @@ namespace alpdaq::network
         /// The expected sequence number of slots[0] if it exists.
         std::optional<uint64_t> base;
         /// The number of elements buffered. The base only changes if count == 0.
-        uint64_t count;
+        uint64_t count = 0;
+        /// (highest seq seen + 1) - *base.
+        uint64_t span = 0;
+
+        /// Begin an episode at the first missing sequence.
+        void openEpisode(uint64_t baseSeq) noexcept
+        {
+            assert(count == 0 && !base);
+            base = baseSeq;
+            span = 0;
+        }
+
+        /// Store the message at `seq` into the window. Returns false iff the slot index
+        /// is past the window. Duplicates are dropped.
+        [[nodiscard]] bool insert(uint64_t seq, std::span<std::byte const> payload) noexcept
+        {
+            assert(base && seq >= *base);
+            if (payload.size() > slots.front().data.size())
+            {
+                return false;
+            }
+            uint64_t const idx = seq - *base;
+            if (idx >= slots.size())
+            {
+                return false;
+            }
+            if (occupied[idx])
+            {
+                return true;
+            }
+            auto& slot = slots[idx];
+            slot.len = static_cast<uint16_t>(payload.size());
+            std::memcpy(slot.data.data(), payload.data(), payload.size());
+            occupied[idx] = true;
+            ++count;
+            if (idx + 1 > span)
+            {
+                span = idx + 1;
+            }
+            return true;
+        }
+
+        /// If the slot at `expected` is occupied, return its payload (valid until the next
+        /// insert at the same index), clear the bit, and decrement count. std::nullopt on a hole.
+        std::optional<std::span<std::byte const>> tryDeliver(uint64_t expected) noexcept
+        {
+            assert(base && expected >= *base);
+            uint64_t const idx = expected - *base;
+            assert(idx < slots.size());
+
+            if (!occupied[idx])
+            {
+                return std::nullopt;
+            }
+            occupied[idx] = false;
+            --count;
+            auto const& slot = slots[idx];
+            return std::span<std::byte const>(slot.data.data(), slot.len);
+        }
+
+        /// End an episode after delivery has cleared everything.
+        void closeEpisode() noexcept
+        {
+            assert(count == 0);
+            base = std::nullopt;
+            span = 0;
+        }
+
+        /// Abort an episode on escalation. Bulk-clears
+        /// the dirty range so the bitmap returns to its between-episodes state.
+        void abortEpisode() noexcept
+        {
+            std::fill(
+                occupied.begin(), occupied.begin() + static_cast<std::ptrdiff_t>(span), false);
+            count = 0;
+            base = std::nullopt;
+            span = 0;
+        }
     };
 
     enum class Phase : uint8_t
@@ -219,6 +299,22 @@ namespace alpdaq::network
         uint64_t joinSeq = 0;
         std::vector<std::byte> rxBuffer;
         size_t rxLength = 0;
+    };
+
+    /// A whole MoldUDP64 packet ready.
+    struct FullMessage
+    {
+        std::array<uint8_t, 10> session;
+        uint64_t sequenceNumber;
+        uint16_t messageCount;
+        /// Points beyond the 20-byte header into UMEM.
+        std::span<std::byte const> messageArea;
+    };
+
+    struct LiveMessage
+    {
+        uint64_t sequenceNumber;
+        std::span<std::byte const> payload;
     };
 
     export enum class OpenError : uint8_t
@@ -304,6 +400,7 @@ namespace alpdaq::network
             buffer_.occupied.assign(config_.recoveryBufferSlots, false);
             buffer_.base = std::nullopt;
             buffer_.count = 0;
+            buffer_.span = 0;
 
             // UMEM: one shared frame pool large enough for the fill and RX rings.
             uint64_t const frameCount = static_cast<uint64_t>(live.fillRingSize) + live.rxRingSize;
@@ -478,6 +575,189 @@ namespace alpdaq::network
             }
         }
 
+        /// Parse ETH (optionally one 802.1Q VLAN tag) + IPv4 (no options) + UDP from a
+        /// captured frame and return a span over the UDP payload. Returns std::nullopt on any
+        /// validation failure.
+        static std::optional<std::span<std::byte const>> parseUdpPayload(std::byte const* frame,
+                                                                         std::size_t len) noexcept
+        {
+            constexpr std::size_t ethHeaderSize = 14;
+            if (len < ethHeaderSize)
+            {
+                return std::nullopt;
+            }
+
+            uint16_t ethertype = 0;
+            std::memcpy(&ethertype, frame + 12, 2);
+            ethertype = std::byteswap(ethertype);
+
+            std::size_t offset = ethHeaderSize;
+            if (ethertype == 0x8100)
+            {
+                if (len < ethHeaderSize + 4)
+                {
+                    return std::nullopt;
+                }
+                std::memcpy(&ethertype, frame + offset + 2, 2);
+                ethertype = std::byteswap(ethertype);
+                offset += 4;
+            }
+            if (ethertype != 0x0800)
+            {
+                return std::nullopt;
+            }
+
+            if (len < offset + 20)
+            {
+                return std::nullopt;
+            }
+            uint8_t const ihl = std::to_integer<uint8_t>(frame[offset]) & 0x0F;
+            if (ihl != 5)
+            {
+                return std::nullopt;
+            }
+            uint8_t const proto = std::to_integer<uint8_t>(frame[offset + 9]);
+            if (proto != 17)
+            {
+                return std::nullopt;
+            }
+            offset += 20;
+
+            if (len < offset + 8)
+            {
+                return std::nullopt;
+            }
+            uint16_t udpLen = 0;
+            std::memcpy(&udpLen, frame + offset + 4, 2);
+            udpLen = std::byteswap(udpLen);
+            if (udpLen < 8)
+            {
+                return std::nullopt;
+            }
+            std::size_t const payloadLen = static_cast<std::size_t>(udpLen) - 8;
+            offset += 8;
+            if (len < offset + payloadLen)
+            {
+                return std::nullopt;
+            }
+            return std::span(frame + offset, payloadLen);
+        }
+
+        /// Recycles the previously-completed batch (if any) and peeks a fresh one from
+        /// the RX ring. On batch recycle: releases the RX descriptors and pushes their
+        /// frame addresses back into the fill ring so the kernel can refill them. Returns
+        /// true iff at least one descriptor is now available at the cursor.
+        bool refillBatch() noexcept
+        {
+            if (rxCursor_.processed != rxCursor_.available)
+            {
+                return rxCursor_.available > 0;
+            }
+            if (rxCursor_.available > 0)
+            {
+                uint32_t fillIdx = 0;
+                uint32_t const reserved =
+                    xsk_ring_prod__reserve(&fillRing_, rxCursor_.available, &fillIdx);
+                for (uint32_t i = 0; i < reserved; ++i)
+                {
+                    xdp_desc const* desc = xsk_ring_cons__rx_desc(&rxRing_, rxCursor_.idx + i);
+                    *xsk_ring_prod__fill_addr(&fillRing_, fillIdx + i) = desc->addr;
+                }
+                if (reserved > 0)
+                {
+                    xsk_ring_prod__submit(&fillRing_, reserved);
+                }
+                xsk_ring_cons__release(&rxRing_, rxCursor_.available);
+            }
+            rxCursor_.idx = 0;
+            rxCursor_.processed = 0;
+            rxCursor_.available =
+                xsk_ring_cons__peek(&rxRing_, config_.liveConfig.rxBatch, &rxCursor_.idx);
+            return rxCursor_.available > 0;
+        }
+
+        /// Peek the next available MoldUDP packet without consuming it. Refills the cursor
+        /// batch when needed. Silently skips frames that fail validation, heartbeats
+        /// (count == 0), and end-of-session markers (count == 0xFFFF) by advancing past
+        /// the descriptor and retrying. Returns std::nullopt iff the ring is empty.
+        std::optional<FullMessage> peekPacket() noexcept
+        {
+            while (true)
+            {
+                if (!refillBatch())
+                {
+                    return std::nullopt;
+                }
+
+                xdp_desc const* desc =
+                    xsk_ring_cons__rx_desc(&rxRing_, rxCursor_.idx + rxCursor_.processed);
+                std::byte const* frame = umemArea_.data() + desc->addr;
+                auto udpPayload = parseUdpPayload(frame, desc->len);
+                if (!udpPayload)
+                {
+                    advancePacket();
+                    continue;
+                }
+
+                MoldItch const mold {.message = *udpPayload};
+                if (!mold.valid())
+                {
+                    advancePacket();
+                    continue;
+                }
+                uint16_t const count = mold.messageCount();
+                if (count == 0 || count == 0xFFFF)
+                {
+                    advancePacket();
+                    continue;
+                }
+
+                return FullMessage {
+                    .session = mold.session(),
+                    .sequenceNumber = mold.sequenceNumber(),
+                    .messageCount = count,
+                    .messageArea = udpPayload->subspan(20),
+                };
+            }
+        }
+
+        /// Release the current descriptor (the one most recently returned by peekPacket).
+        /// The batch's RX descriptors are released and the fill ring repopulated only
+        /// when the batch is exhausted, on the next refillBatch().
+        void advancePacket() noexcept
+        {
+            if (rxCursor_.processed < rxCursor_.available)
+            {
+                ++rxCursor_.processed;
+            }
+            rxCursor_.msgOffset = 0;
+            rxCursor_.msgRemain = 0;
+        }
+
+        /// Pop one ITCH message from currentPacket_ at the cursor's position. The
+        /// returned payload span is valid until the next advancePacket() (or popLiveMessage()).
+        LiveMessage popLiveMessage() noexcept
+        {
+            assert(currentPacket_ && rxCursor_.msgRemain > 0);
+
+            auto const& packet = *currentPacket_;
+            std::byte const* base = packet.messageArea.data();
+            uint16_t lenBe = 0;
+            std::memcpy(&lenBe, base + rxCursor_.msgOffset, sizeof(lenBe));
+            uint16_t const len = std::byteswap(lenBe);
+            auto payload = std::span(base + rxCursor_.msgOffset + 2, len);
+            uint64_t const seq =
+                packet.sequenceNumber + (packet.messageCount - rxCursor_.msgRemain);
+            rxCursor_.msgOffset += 2 + len;
+            --rxCursor_.msgRemain;
+            if (rxCursor_.msgRemain == 0)
+            {
+                currentPacket_.reset();
+                advancePacket();
+            }
+            return LiveMessage {.sequenceNumber = seq, .payload = payload};
+        }
+
         AfXdpConfig config_;
         std::shared_ptr<Logger> logger_;
 
@@ -496,6 +776,9 @@ namespace alpdaq::network
         int joinFd_ = -1;
 
         RxCursor rxCursor_;
+        /// The packet whose messages we are currently iterating. Engaged iff msgRemain > 0;
+        /// popLiveMessage clears it when the last message in the packet is consumed.
+        std::optional<FullMessage> currentPacket_;
 
         io_uring ring_ {};
         bool uringReady_ = false;
