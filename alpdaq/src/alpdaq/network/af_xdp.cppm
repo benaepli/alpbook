@@ -7,7 +7,6 @@ module;
 #include <cerrno>
 #include <charconv>
 #include <chrono>
-#include <cstdint>
 #include <cstring>
 #include <expected>
 #include <memory>
@@ -136,6 +135,10 @@ namespace alpdaq::network
 
             IpV4Endpoint rewindServer;
             IpV4Endpoint glimpseServer;
+            /// SoupBinTCP login credentials. Username is space-padded to 6 bytes;
+            /// password to 10 bytes.
+            std::string glimpseUsername;
+            std::string glimpsePassword;
         };
 
         LiveConfig liveConfig;
@@ -905,6 +908,11 @@ namespace alpdaq::network
                 {
                     break;
                 }
+                // Drop messages below the episode base.
+                if (buffer_.base && msg->sequenceNumber < *buffer_.base)
+                {
+                    continue;
+                }
                 if (!buffer_.insert(msg->sequenceNumber, msg->payload))
                 {
                     logger_->logBufferOverflow();
@@ -971,7 +979,7 @@ namespace alpdaq::network
         }
 
         /// Handles a rewind recv completion: ingests the response (only while in
-        /// GapRecovery with an open buffer) and re-posts the recv. 
+        /// GapRecovery with an open buffer) and re-posts the recv.
         void handleRewindRecv(int res) noexcept
         {
             rewindRecvPosted_ = false;
@@ -1097,7 +1105,7 @@ namespace alpdaq::network
         {
             assert(buffer_.base);
 
-            // 1. Drain priority: emit if the next expected slot is occupied.
+            // First, we try to drain.
             if (auto const payload = buffer_.tryDeliver(expected_))
             {
                 uint64_t const seq = expected_++;
@@ -1111,7 +1119,7 @@ namespace alpdaq::network
                 return;
             }
 
-            // 2. Buffer one live packet if available; detect new gaps at the write frontier.
+            // Then we buffer one live packet if available and detect new gaps.
             if (auto pkt = peekPacket())
             {
                 if (pkt->session != currentSession_)
@@ -1143,7 +1151,7 @@ namespace alpdaq::network
                 }
             }
 
-            // 3. Timeout retry: re-issue requests for every unoccupied run.
+            // Timeout for runs.
             if (buffer_.base)
             {
                 auto const now = std::chrono::steady_clock::now();
