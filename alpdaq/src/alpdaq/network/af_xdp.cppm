@@ -28,6 +28,7 @@ module;
 export module alpdaq.network.af_xdp;
 
 import alpdaq.system;
+import alpdaq.system.state;
 import alpdaq.network;
 
 namespace alpdaq::network
@@ -317,6 +318,35 @@ namespace alpdaq::network
         std::span<std::byte const> payload;
     };
 
+    struct MoldMessage
+    {
+        std::span<std::byte const> payload;
+        /// Offset of the following message within the area.
+        size_t next;
+    };
+
+    /// Decodes the ITCH message at an offset. Returns std::nullopt if the area is truncated at or
+    /// after offset.
+    [[nodiscard]] inline std::optional<MoldMessage> decodeMoldMessage(
+        std::span<std::byte const> area, size_t offset) noexcept
+    {
+        if (offset + 2 > area.size())
+        {
+            return std::nullopt;
+        }
+        uint16_t lenBe = 0;
+        std::memcpy(&lenBe, area.data() + offset, sizeof(lenBe));
+        uint16_t const len = std::byteswap(lenBe);
+        if (offset + 2 + len > area.size())
+        {
+            return std::nullopt;
+        }
+        return MoldMessage {
+            .payload = std::span(area.data() + offset + 2, len),
+            .next = offset + 2 + static_cast<size_t>(len),
+        };
+    }
+
     export enum class OpenError : uint8_t
     {
         InvalidConfig,
@@ -356,9 +386,36 @@ namespace alpdaq::network
         template<typename DataCb, typename EventCb>
         void poll(DataCb onData, EventCb onEvent) noexcept
         {
+            if (restartRequested_)
+            {
+                restartRequested_ = false;
+                enterSnapshotRecovery();
+                return;
+            }
+            if (recoveryCompletePending_)
+            {
+                recoveryCompletePending_ = false;
+                onEvent(SourceEvent {RecoveryComplete {}});
+                return;
+            }
+
+            serviceUringCq();
+
+            switch (phase_)
+            {
+                case Phase::Streaming:
+                    pollStreaming(onData, onEvent);
+                    break;
+                case Phase::GapRecovery:
+                    pollGapRecovery(onData, onEvent);
+                    break;
+                case Phase::SnapshotRecovery:
+                    // TODO: GLIMPSE-based snapshot recovery.
+                    break;
+            }
         }
 
-        void forceRestart() noexcept {}
+        void forceRestart() noexcept { restartRequested_ = true; }
 
       private:
         /// Maps a positive errno to the closest OpenError, falling back to the caller's category.
@@ -384,7 +441,8 @@ namespace alpdaq::network
                 if (!std::has_single_bit(live.frameSize) || live.frameSize < 2048
                     || !std::has_single_bit(live.fillRingSize)
                     || !std::has_single_bit(live.rxRingSize) || live.rxBatch == 0
-                    || live.rxBatch > live.rxRingSize || config.recoveryBufferSlots == 0)
+                    || live.rxBatch > live.rxRingSize || config.recoveryBufferSlots == 0
+                    || config.recoveryConfig.sqEntries == 0)
                 {
                     return std::unexpected(OpenError::InvalidConfig);
                 }
@@ -513,6 +571,10 @@ namespace alpdaq::network
                 return std::unexpected(classifyErrno(-err, OpenError::UringInitFailed));
             }
             uringReady_ = true;
+
+            // Sizing to sqEntries should, for all intents and purposes, be sufficient.
+            rewindTxPool_.assign(recovery.sqEntries, {});
+            rewindTxIdx_ = 0;
 
             // Rewind request socket connected.
             rewindFd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -726,36 +788,371 @@ namespace alpdaq::network
         /// when the batch is exhausted, on the next refillBatch().
         void advancePacket() noexcept
         {
-            if (rxCursor_.processed < rxCursor_.available)
-            {
-                ++rxCursor_.processed;
-            }
+            assert(rxCursor_.processed < rxCursor_.available);
+
+            ++rxCursor_.processed;
             rxCursor_.msgOffset = 0;
             rxCursor_.msgRemain = 0;
         }
 
-        /// Pop one ITCH message from currentPacket_ at the cursor's position. The
-        /// returned payload span is valid until the next advancePacket() (or popLiveMessage()).
-        LiveMessage popLiveMessage() noexcept
+        /// Pop one ITCH message from currentPacket_ at the cursor's position. Returns
+        /// std::nullopt (and abandons the packet) if its area is truncated before the
+        /// message the cursor claims. The returned payload span is valid until the next
+        /// advancePacket() (or popLiveMessage()).
+        std::optional<LiveMessage> popLiveMessage() noexcept
         {
             assert(currentPacket_ && rxCursor_.msgRemain > 0);
 
             auto const& packet = *currentPacket_;
-            std::byte const* base = packet.messageArea.data();
-            uint16_t lenBe = 0;
-            std::memcpy(&lenBe, base + rxCursor_.msgOffset, sizeof(lenBe));
-            uint16_t const len = std::byteswap(lenBe);
-            auto payload = std::span(base + rxCursor_.msgOffset + 2, len);
+            auto const decoded = decodeMoldMessage(packet.messageArea, rxCursor_.msgOffset);
+            if (!decoded)
+            {
+                currentPacket_.reset();
+                advancePacket();
+                return std::nullopt;
+            }
+
             uint64_t const seq =
                 packet.sequenceNumber + (packet.messageCount - rxCursor_.msgRemain);
-            rxCursor_.msgOffset += 2 + len;
+            rxCursor_.msgOffset = decoded->next;
             --rxCursor_.msgRemain;
             if (rxCursor_.msgRemain == 0)
             {
                 currentPacket_.reset();
                 advancePacket();
             }
-            return LiveMessage {.sequenceNumber = seq, .payload = payload};
+            return LiveMessage {.sequenceNumber = seq, .payload = decoded->payload};
+        }
+
+        static constexpr uint64_t URING_REWIND_SEND = 1;
+        static constexpr uint64_t URING_REWIND_RECV = 2;
+
+        /// Submits a MoldUDP rewind request for [seq, seq + count) via io_uring on
+        /// rewindFd_.
+        void submitRewindRequest(uint64_t seq, uint16_t count) noexcept
+        {
+            auto& buf = rewindTxPool_[rewindTxIdx_];
+            rewindTxIdx_ = static_cast<uint32_t>((rewindTxIdx_ + 1) % rewindTxPool_.size());
+
+            std::memcpy(buf.data(), currentSession_.data(), 10);
+            uint64_t const seqBe = std::byteswap(seq);
+            std::memcpy(buf.data() + 10, &seqBe, 8);
+            uint16_t const countBe = std::byteswap(count);
+            std::memcpy(buf.data() + 18, &countBe, 2);
+
+            io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+            if (sqe == nullptr)
+            {
+                logger_->logFeedError();
+                return;
+            }
+            io_uring_prep_send(sqe, rewindFd_, buf.data(), buf.size(), 0);
+            sqe->user_data = URING_REWIND_SEND;
+            io_uring_submit(&ring_);
+
+            lastRequest_ = std::chrono::steady_clock::now();
+            logger_->logRewindRequest(seq, count);
+        }
+
+        /// Posts a recv on rewindFd_ via io_uring if one is not already outstanding.
+        void ensureRewindRecvPosted() noexcept
+        {
+            if (rewindRecvPosted_)
+            {
+                return;
+            }
+            io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+            if (sqe == nullptr)
+            {
+                logger_->logFeedError();
+                return;
+            }
+            io_uring_prep_recv(sqe, rewindFd_, rewindRxBuf_.data(), rewindRxBuf_.size(), 0);
+            sqe->user_data = URING_REWIND_RECV;
+            io_uring_submit(&ring_);
+            rewindRecvPosted_ = true;
+        }
+
+        /// Resets the source to a clean SnapshotRecovery starting state. Used by
+        /// forceRestart() and by overflow / session-change escalations.
+        void enterSnapshotRecovery() noexcept
+        {
+            currentPacket_.reset();
+            if (buffer_.base)
+            {
+                buffer_.abortEpisode();
+            }
+            expected_ = 0;
+            currentSession_ = {};
+            rxCursor_.msgOffset = 0;
+            rxCursor_.msgRemain = 0;
+            recoveryCompletePending_ = false;
+            phase_ = Phase::SnapshotRecovery;
+        }
+
+        /// Walks the MoldUDP packet pkt, inserting every message into the recovery
+        /// buffer. On insert overflow, logs and escalates to SnapshotRecovery; returns
+        /// false in that case (caller should return too).
+        bool bufferEntirePacket(FullMessage const& pkt) noexcept
+        {
+            currentPacket_ = pkt;
+            rxCursor_.msgOffset = 0;
+            rxCursor_.msgRemain = pkt.messageCount;
+            while (rxCursor_.msgRemain > 0)
+            {
+                auto const msg = popLiveMessage();
+                if (!msg)
+                {
+                    break;
+                }
+                if (!buffer_.insert(msg->sequenceNumber, msg->payload))
+                {
+                    logger_->logBufferOverflow();
+                    enterSnapshotRecovery();
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// Scans the buffer's occupied bitmap and submits a fresh rewind request for
+        /// every unoccupied run in [0, span). Splits runs larger than 0xFFFF.
+        void rescanAndResubmit() noexcept
+        {
+            if (!buffer_.base)
+            {
+                return;
+            }
+            uint64_t i = 0;
+            while (i < buffer_.span)
+            {
+                if (buffer_.occupied[i])
+                {
+                    ++i;
+                    continue;
+                }
+                uint64_t const runStart = i;
+                while (i < buffer_.span && !buffer_.occupied[i])
+                {
+                    ++i;
+                }
+                uint64_t const length = i - runStart;
+                uint64_t off = 0;
+                while (off < length)
+                {
+                    uint16_t const chunk =
+                        static_cast<uint16_t>(std::min<uint64_t>(length - off, 0xFFFFu));
+                    submitRewindRequest(*buffer_.base + runStart + off, chunk);
+                    off += chunk;
+                }
+            }
+        }
+
+        /// Drains the io_uring completion queue, dispatching each completion by tag.
+        void serviceUringCq() noexcept
+        {
+            io_uring_cqe* cqe = nullptr;
+            while (io_uring_peek_cqe(&ring_, &cqe) == 0)
+            {
+                uint64_t const tag = cqe->user_data;
+                int const res = cqe->res;
+                io_uring_cqe_seen(&ring_, cqe);
+
+                switch (tag)
+                {
+                    case URING_REWIND_RECV:
+                        handleRewindRecv(res);
+                        break;
+                    case URING_REWIND_SEND:
+                        handleRewindSend(res);
+                        break;
+                }
+            }
+        }
+
+        /// Handles a rewind recv completion: ingests the response (only while in
+        /// GapRecovery with an open buffer) and re-posts the recv. 
+        void handleRewindRecv(int res) noexcept
+        {
+            rewindRecvPosted_ = false;
+            if (res < 0)
+            {
+                logger_->logFeedError();
+            }
+            else if (res > 0 && phase_ == Phase::GapRecovery && buffer_.base)
+            {
+                ingestRewindResponse(std::span(rewindRxBuf_.data(), static_cast<size_t>(res)));
+            }
+            ensureRewindRecvPosted();
+        }
+
+        /// Handles a rewind send completion. A negative res is a feed error.
+        void handleRewindSend(int res) noexcept
+        {
+            if (res < 0)
+            {
+                logger_->logFeedError();
+            }
+        }
+
+        /// Parses a MoldUDP64 rewind response and inserts each ITCH message into the
+        /// recovery buffer. On buffer overflow, logs and escalates to SnapshotRecovery.
+        void ingestRewindResponse(std::span<std::byte const> packet) noexcept
+        {
+            MoldItch const mold {.message = packet};
+            if (!mold.valid())
+            {
+                return;
+            }
+            uint16_t const count = mold.messageCount();
+            if (count == 0 || count == 0xFFFF)
+            {
+                return;
+            }
+
+            uint64_t const firstSeq = mold.sequenceNumber();
+            auto const area = packet.subspan(20);
+            size_t offset = 0;
+            for (uint16_t i = 0; i < count; ++i)
+            {
+                auto const decoded = decodeMoldMessage(area, offset);
+                if (!decoded)
+                {
+                    break;
+                }
+                if (!buffer_.insert(firstSeq + i, decoded->payload))
+                {
+                    logger_->logBufferOverflow();
+                    enterSnapshotRecovery();
+                    break;
+                }
+                offset = decoded->next;
+            }
+        }
+
+        template<typename DataCb, typename EventCb>
+        void pollStreaming(DataCb onData, EventCb onEvent) noexcept
+        {
+            if (!currentPacket_)
+            {
+                auto pkt = peekPacket();
+                if (!pkt)
+                {
+                    return;
+                }
+
+                if (pkt->session != currentSession_)
+                {
+                    currentSession_ = pkt->session;
+                    onEvent(SourceEvent {SessionChanged {pkt->session}});
+                    return;
+                }
+
+                if (expected_ != 0 && pkt->sequenceNumber != expected_)
+                {
+                    uint64_t const totalMissing = pkt->sequenceNumber - expected_;
+                    logger_->logGapDetected(
+                        expected_,
+                        static_cast<uint16_t>(std::min<uint64_t>(totalMissing, 0xFFFFu)));
+
+                    buffer_.openEpisode(expected_);
+
+                    uint64_t off = 0;
+                    while (off < totalMissing)
+                    {
+                        uint16_t const chunk =
+                            static_cast<uint16_t>(std::min<uint64_t>(totalMissing - off, 0xFFFFu));
+                        submitRewindRequest(expected_ + off, chunk);
+                        off += chunk;
+                    }
+                    ensureRewindRecvPosted();
+
+                    if (!bufferEntirePacket(*pkt))
+                    {
+                        return;
+                    }
+
+                    phase_ = Phase::GapRecovery;
+                    onEvent(SourceEvent {GapRecovery {}});
+                    return;
+                }
+
+                expected_ = pkt->sequenceNumber;
+                currentPacket_ = *pkt;
+                rxCursor_.msgOffset = 0;
+                rxCursor_.msgRemain = pkt->messageCount;
+            }
+
+            auto const msg = popLiveMessage();
+            if (!msg)
+            {
+                return;
+            }
+            expected_ = msg->sequenceNumber + 1;
+            onData(ItchView {.sequenceNumber = msg->sequenceNumber, .payload = msg->payload});
+        }
+
+        template<typename DataCb, typename EventCb>
+        void pollGapRecovery(DataCb onData, EventCb /*onEvent*/) noexcept
+        {
+            assert(buffer_.base);
+
+            // 1. Drain priority: emit if the next expected slot is occupied.
+            if (auto const payload = buffer_.tryDeliver(expected_))
+            {
+                uint64_t const seq = expected_++;
+                if (buffer_.count == 0)
+                {
+                    buffer_.closeEpisode();
+                    phase_ = Phase::Streaming;
+                    recoveryCompletePending_ = true;
+                }
+                onData(ItchView {.sequenceNumber = seq, .payload = *payload});
+                return;
+            }
+
+            // 2. Buffer one live packet if available; detect new gaps at the write frontier.
+            if (auto pkt = peekPacket())
+            {
+                if (pkt->session != currentSession_)
+                {
+                    enterSnapshotRecovery();
+                    return;
+                }
+
+                uint64_t const writeFrontier = *buffer_.base + buffer_.span;
+                if (pkt->sequenceNumber > writeFrontier)
+                {
+                    uint64_t const newGapLength = pkt->sequenceNumber - writeFrontier;
+                    uint64_t off = 0;
+                    while (off < newGapLength)
+                    {
+                        uint16_t const chunk =
+                            static_cast<uint16_t>(std::min<uint64_t>(newGapLength - off, 0xFFFFu));
+                        submitRewindRequest(writeFrontier + off, chunk);
+                        off += chunk;
+                    }
+                    logger_->logGapDetected(
+                        writeFrontier,
+                        static_cast<uint16_t>(std::min<uint64_t>(newGapLength, 0xFFFFu)));
+                }
+
+                if (!bufferEntirePacket(*pkt))
+                {
+                    return;
+                }
+            }
+
+            // 3. Timeout retry: re-issue requests for every unoccupied run.
+            if (buffer_.base)
+            {
+                auto const now = std::chrono::steady_clock::now();
+                if (now - lastRequest_ > config_.rewindTimeout)
+                {
+                    rescanAndResubmit();
+                    logger_->logRewindTimeout();
+                }
+            }
         }
 
         AfXdpConfig config_;
@@ -764,6 +1161,11 @@ namespace alpdaq::network
         uint64_t expected_ = 0;
         Phase phase_ = Phase::Streaming;
         bool restartRequested_ = false;
+        /// Set when GapRecovery's drain completes; the next poll emits RecoveryComplete.
+        bool recoveryCompletePending_ = false;
+        /// Session bytes of the most recently emitted SessionChanged event. All-zero
+        /// before the first packet ever.
+        std::array<uint8_t, 10> currentSession_ {};
 
         RecoveryBuffer buffer_;
 
@@ -786,6 +1188,14 @@ namespace alpdaq::network
         int rewindFd_ = -1;
         /// A TCP file descriptor for GLIMPSE recovery. Created lazily.
         int glimpseFd_ = -1;
+        /// True iff a recv on rewindFd_ is currently outstanding in io_uring.
+        bool rewindRecvPosted_ = false;
+        /// Receive buffer for rewind responses; sized for one MoldUDP packet.
+        std::array<std::byte, 2048> rewindRxBuf_ {};
+        /// Stable backing storage for in-flight rewind request packets. A ring
+        /// sized such that the io_uring SQE always holds a pointer that outlives the submission.
+        std::vector<std::array<std::byte, 20>> rewindTxPool_;
+        uint32_t rewindTxIdx_ = 0;
 
         std::chrono::steady_clock::time_point lastRequest_;
         GlimpseState glimpse_;
