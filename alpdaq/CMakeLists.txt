@@ -1,3 +1,8 @@
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(libbpf REQUIRED IMPORTED_TARGET libbpf)
+pkg_check_modules(libxdp REQUIRED IMPORTED_TARGET libxdp)
+pkg_check_modules(liburing REQUIRED IMPORTED_TARGET liburing)
+
 add_library(alpdaq)
 
 target_sources(alpdaq
@@ -31,6 +36,9 @@ target_link_libraries(alpdaq
         readerwriterqueue
         hwloc
         spdlog::spdlog
+        PkgConfig::libbpf
+        PkgConfig::libxdp
+        PkgConfig::liburing
 )
 
 target_compile_features(alpdaq PUBLIC cxx_std_23)
