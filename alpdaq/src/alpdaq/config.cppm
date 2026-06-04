@@ -157,7 +157,8 @@ namespace alpdaq::config
             if (str->get().size() > alpbook::itch::STOCK_TICKER_LEN)
             {
                 return std::unexpected(std::format("stock ticker \"{}\" exceeds max length {}",
-                                                   str->get(), alpbook::itch::STOCK_TICKER_LEN));
+                                                   str->get(),
+                                                   alpbook::itch::STOCK_TICKER_LEN));
             }
             alpbook::itch::StockTicker ticker {};
             ticker.fill(' ');

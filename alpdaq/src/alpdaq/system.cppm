@@ -293,7 +293,6 @@ namespace alpdaq
                             {
                                 config_.logger->logTotalRecovery();
                                 clearOrderBooks();
-                                source_.forceRestart();
                                 recovery_ = true;
                                 nextState = SystemState::Waiting;
                             },
@@ -513,7 +512,6 @@ namespace alpdaq
                     {
                         config_.logger->logTotalRecovery();
                         clearOrderBooks();
-                        source_.forceRestart();
                         recovery_ = true;
                         nextState = SystemState::Waiting;
                     },

@@ -296,11 +296,14 @@ namespace alpdaq::network
         {
             Idle,
             Connecting,
-            Snapshot
+            LoggingIn,
+            Snapshot,
+            Done,
         };
 
         Stage stage = Stage::Idle;
-        uint64_t joinSeq = 0;
+        /// Sequence number to assign to the next incoming SoupBinTCP data packet.
+        uint64_t nextSnapshotSeq = 0;
         std::vector<std::byte> rxBuffer;
         size_t rxLength = 0;
     };
@@ -401,6 +404,12 @@ namespace alpdaq::network
                 onEvent(SourceEvent {RecoveryComplete {}});
                 return;
             }
+            if (sessionChangePending_)
+            {
+                sessionChangePending_ = false;
+                onEvent(SourceEvent {SessionChanged {currentSession_}});
+                return;
+            }
 
             serviceUringCq();
 
@@ -413,7 +422,7 @@ namespace alpdaq::network
                     pollGapRecovery(onData, onEvent);
                     break;
                 case Phase::SnapshotRecovery:
-                    // TODO: GLIMPSE-based snapshot recovery.
+                    pollSnapshotRecovery(onData, onEvent);
                     break;
             }
         }
@@ -595,6 +604,15 @@ namespace alpdaq::network
                 < 0)
             {
                 return std::unexpected(classifyErrno(errno, OpenError::SocketSetupFailed));
+            }
+
+            // Pre-allocate the recv buffer and build the heartbeat.
+            glimpse_.rxBuffer.resize(16384);
+            glimpse_.rxLength = 0;
+            {
+                uint16_t const hbLen = std::byteswap(static_cast<uint16_t>(1));
+                std::memcpy(glimpseHeartbeatTxBuf_.data(), &hbLen, 2);
+                glimpseHeartbeatTxBuf_[2] = std::byte {'R'};
             }
 
             return {};
@@ -829,6 +847,9 @@ namespace alpdaq::network
 
         static constexpr uint64_t URING_REWIND_SEND = 1;
         static constexpr uint64_t URING_REWIND_RECV = 2;
+        static constexpr uint64_t URING_GLIMPSE_CONNECT = 3;
+        static constexpr uint64_t URING_GLIMPSE_SEND = 4;
+        static constexpr uint64_t URING_GLIMPSE_RECV = 5;
 
         /// Submits a MoldUDP rewind request for [seq, seq + count) via io_uring on
         /// rewindFd_.
@@ -890,6 +911,19 @@ namespace alpdaq::network
             rxCursor_.msgOffset = 0;
             rxCursor_.msgRemain = 0;
             recoveryCompletePending_ = false;
+            sessionChangePending_ = false;
+            totalRecoveryEmitted_ = false;
+
+            if (glimpseFd_ >= 0)
+            {
+                ::close(glimpseFd_);
+                glimpseFd_ = -1;
+            }
+            glimpse_.stage = GlimpseState::Stage::Idle;
+            glimpse_.nextSnapshotSeq = 0;
+            glimpse_.rxLength = 0;
+            glimpseRecvPosted_ = false;
+
             phase_ = Phase::SnapshotRecovery;
         }
 
@@ -974,6 +1008,15 @@ namespace alpdaq::network
                     case URING_REWIND_SEND:
                         handleRewindSend(res);
                         break;
+                    case URING_GLIMPSE_CONNECT:
+                        handleGlimpseConnect(res);
+                        break;
+                    case URING_GLIMPSE_SEND:
+                        handleGlimpseSend(res);
+                        break;
+                    case URING_GLIMPSE_RECV:
+                        handleGlimpseRecv(res);
+                        break;
                 }
             }
         }
@@ -1036,6 +1079,304 @@ namespace alpdaq::network
                 }
                 offset = decoded->next;
             }
+        }
+
+        /// Creates a TCP socket for GLIMPSE and submits an io_uring connect to the
+        /// configured server. On failure, logs and leaves stage=Idle so retry can
+        /// happen via forceRestart.
+        void startGlimpseConnect() noexcept
+        {
+            glimpseFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (glimpseFd_ < 0)
+            {
+                logger_->logFeedError();
+                return;
+            }
+            glimpseConnectAddr_ = {};
+            glimpseConnectAddr_.sin_family = AF_INET;
+            glimpseConnectAddr_.sin_port = htons(config_.recoveryConfig.glimpseServer.port);
+            std::memcpy(&glimpseConnectAddr_.sin_addr.s_addr,
+                        config_.recoveryConfig.glimpseServer.address.data(),
+                        config_.recoveryConfig.glimpseServer.address.size());
+
+            io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+            if (sqe == nullptr)
+            {
+                logger_->logFeedError();
+                ::close(glimpseFd_);
+                glimpseFd_ = -1;
+                return;
+            }
+            io_uring_prep_connect(sqe,
+                                  glimpseFd_,
+                                  reinterpret_cast<sockaddr*>(&glimpseConnectAddr_),
+                                  sizeof(glimpseConnectAddr_));
+            sqe->user_data = URING_GLIMPSE_CONNECT;
+            io_uring_submit(&ring_);
+            glimpse_.stage = GlimpseState::Stage::Connecting;
+        }
+
+        /// Builds the SoupBinTCP Login Request into glimpseLoginTxBuf_ and submits a
+        /// send via io_uring.
+        void sendGlimpseLogin() noexcept
+        {
+            auto& buf = glimpseLoginTxBuf_;
+            uint16_t const lenBe = std::byteswap(static_cast<uint16_t>(47));
+            std::memcpy(buf.data(), &lenBe, 2);
+            buf[2] = std::byte {'L'};
+
+            auto fillField = [&buf](size_t pos, size_t width, std::string const& src)
+            {
+                size_t const copyLen = std::min(src.size(), width);
+                for (size_t i = 0; i < copyLen; ++i)
+                {
+                    buf[pos + i] = static_cast<std::byte>(src[i]);
+                }
+                for (size_t i = copyLen; i < width; ++i)
+                {
+                    buf[pos + i] = std::byte {' '};
+                }
+            };
+            fillField(3, 6, config_.recoveryConfig.glimpseUsername);
+            fillField(9, 10, config_.recoveryConfig.glimpsePassword);
+            // Requested session: all spaces is server's current session.
+            for (size_t i = 19; i < 29; ++i)
+            {
+                buf[i] = std::byte {' '};
+            }
+            // Requested sequence: "0" right-justified in 20 ASCII bytes is snapshot.
+            for (size_t i = 29; i < 48; ++i)
+            {
+                buf[i] = std::byte {' '};
+            }
+            buf[48] = std::byte {'0'};
+
+            io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+            if (sqe == nullptr)
+            {
+                logger_->logFeedError();
+                return;
+            }
+            io_uring_prep_send(sqe, glimpseFd_, buf.data(), buf.size(), 0);
+            sqe->user_data = URING_GLIMPSE_SEND;
+            io_uring_submit(&ring_);
+        }
+
+        /// Submits the pre-built client heartbeat frame as a response.
+        void sendGlimpseHeartbeat() noexcept
+        {
+            if (glimpseFd_ < 0)
+            {
+                return;
+            }
+            io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+            if (sqe == nullptr)
+            {
+                logger_->logFeedError();
+                return;
+            }
+            io_uring_prep_send(
+                sqe, glimpseFd_, glimpseHeartbeatTxBuf_.data(), glimpseHeartbeatTxBuf_.size(), 0);
+            sqe->user_data = URING_GLIMPSE_SEND;
+            io_uring_submit(&ring_);
+        }
+
+        /// Posts a recv on glimpseFd_ if one is not already outstanding. Buffer pointer
+        /// is data() + rxLength (stable across the recv's lifetime since rxBuffer is
+        /// pre-sized and never reallocated, and ingest's memmove only runs after
+        /// completion).
+        void ensureGlimpseRecvPosted() noexcept
+        {
+            if (glimpseRecvPosted_ || glimpseFd_ < 0)
+            {
+                return;
+            }
+            if (glimpse_.rxLength >= glimpse_.rxBuffer.size())
+            {
+                return;
+            }
+            io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+            if (sqe == nullptr)
+            {
+                logger_->logFeedError();
+                return;
+            }
+            io_uring_prep_recv(sqe,
+                               glimpseFd_,
+                               glimpse_.rxBuffer.data() + glimpse_.rxLength,
+                               glimpse_.rxBuffer.size() - glimpse_.rxLength,
+                               0);
+            sqe->user_data = URING_GLIMPSE_RECV;
+            io_uring_submit(&ring_);
+            glimpseRecvPosted_ = true;
+        }
+
+        /// Handles a GLIMPSE connect completion: on success, sends the Login Request
+        /// and posts the first recv; on failure, logs and leaves stalled.
+        void handleGlimpseConnect(int res) noexcept
+        {
+            if (res < 0)
+            {
+                logger_->logFeedError();
+                return;
+            }
+            sendGlimpseLogin();
+            glimpse_.stage = GlimpseState::Stage::LoggingIn;
+            ensureGlimpseRecvPosted();
+        }
+
+        /// Handles a GLIMPSE send completion. A negative res is a feed error.
+        void handleGlimpseSend(int res) noexcept
+        {
+            if (res < 0)
+            {
+                logger_->logFeedError();
+            }
+        }
+
+        /// Appends new bytes to rxBuffer, ingests any complete SoupBin frames,
+        /// and re-posts the recv if the connection is still alive.
+        void handleGlimpseRecv(int res) noexcept
+        {
+            glimpseRecvPosted_ = false;
+            if (res < 0)
+            {
+                logger_->logFeedError();
+                return;
+            }
+            if (res == 0)
+            {
+                // Peer closed.
+                return;
+            }
+            glimpse_.rxLength += static_cast<size_t>(res);
+            ingestSoupBinFrames();
+            if (glimpse_.stage != GlimpseState::Stage::Done && glimpseFd_ >= 0)
+            {
+                ensureGlimpseRecvPosted();
+            }
+        }
+
+        /// Walks the rxBuffer, dispatching every complete SoupBinTCP frame to
+        /// handleSoupBinFrame and sliding any partial tail back to the start.
+        void ingestSoupBinFrames() noexcept
+        {
+            size_t offset = 0;
+            while (offset + 2 <= glimpse_.rxLength)
+            {
+                uint16_t lenBe = 0;
+                std::memcpy(&lenBe, glimpse_.rxBuffer.data() + offset, 2);
+                uint16_t const frameLen = std::byteswap(lenBe);
+                if (frameLen == 0)
+                {
+                    offset += 2;
+                    continue;
+                }
+                if (offset + 2 + frameLen > glimpse_.rxLength)
+                {
+                    break;
+                }
+                uint8_t const type = std::to_integer<uint8_t>(glimpse_.rxBuffer[offset + 2]);
+                auto const payload = std::span<std::byte const>(
+                    glimpse_.rxBuffer.data() + offset + 3, static_cast<size_t>(frameLen - 1));
+                handleSoupBinFrame(type, payload);
+                offset += 2 + frameLen;
+            }
+            if (offset > 0)
+            {
+                if (offset < glimpse_.rxLength)
+                {
+                    std::memmove(glimpse_.rxBuffer.data(),
+                                 glimpse_.rxBuffer.data() + offset,
+                                 glimpse_.rxLength - offset);
+                }
+                glimpse_.rxLength -= offset;
+            }
+        }
+
+        /// Dispatches a SoupBinTCP frame by type.
+        void handleSoupBinFrame(uint8_t type, std::span<std::byte const> payload) noexcept
+        {
+            switch (type)
+            {
+                case 'L':  // Login Accepted
+                    handleLoginAccepted(payload);
+                    break;
+                case 'J':  // Login Rejected
+                    logger_->logFeedError();
+                    break;
+                case 'S':  // Sequenced Data
+                    if (glimpse_.stage == GlimpseState::Stage::Snapshot && buffer_.base)
+                    {
+                        if (!buffer_.insert(glimpse_.nextSnapshotSeq, payload))
+                        {
+                            logger_->logBufferOverflow();
+                        }
+                        else
+                        {
+                            ++glimpse_.nextSnapshotSeq;
+                        }
+                    }
+                    break;
+                case 'H':  // Server Heartbeat
+                    sendGlimpseHeartbeat();
+                    break;
+                case 'Z':  // End of Session
+                    glimpse_.stage = GlimpseState::Stage::Done;
+                    rescanAndResubmit();
+                    logger_->logSnapshotComplete(glimpse_.nextSnapshotSeq);
+                    if (glimpseFd_ >= 0)
+                    {
+                        ::close(glimpseFd_);
+                        glimpseFd_ = -1;
+                    }
+                    break;
+                case '+':
+                default:
+                    break;
+            }
+        }
+
+        /// Parses a login accepted message,
+        /// anchors the recovery buffer at the snapshot's first sequence, flips into
+        /// GapRecovery, and defers the SessionChanged event to the next poll.
+        void handleLoginAccepted(std::span<std::byte const> payload) noexcept
+        {
+            if (payload.size() < 30)
+            {
+                logger_->logFeedError();
+                return;
+            }
+            std::array<uint8_t, 10> session;
+            std::memcpy(session.data(), payload.data(), 10);
+
+            char buf[21] = {};
+            for (size_t i = 0; i < 20; ++i)
+            {
+                buf[i] = static_cast<char>(std::to_integer<uint8_t>(payload[10 + i]));
+            }
+            char const* p = buf;
+            while (p < buf + 20 && *p == ' ')
+            {
+                ++p;
+            }
+            uint64_t startSeq = 0;
+            std::from_chars(p, buf + 20, startSeq);
+
+            currentSession_ = session;
+            expected_ = startSeq;
+            glimpse_.nextSnapshotSeq = startSeq;
+
+            if (buffer_.base)
+            {
+                buffer_.abortEpisode();
+            }
+            buffer_.openEpisode(startSeq);
+
+            sessionChangePending_ = true;
+            glimpse_.stage = GlimpseState::Stage::Snapshot;
+            phase_ = Phase::GapRecovery;
+            logger_->logSnapshotStart();
         }
 
         template<typename DataCb, typename EventCb>
@@ -1163,6 +1504,23 @@ namespace alpdaq::network
             }
         }
 
+        /// SnapshotRecovery body. Emits TotalRecovery once on entry, kicks off the
+        /// GLIMPSE connect, then idles. Actual work is done in the receive handler.
+        template<typename DataCb, typename EventCb>
+        void pollSnapshotRecovery(DataCb /*onData*/, EventCb onEvent) noexcept
+        {
+            if (!totalRecoveryEmitted_)
+            {
+                totalRecoveryEmitted_ = true;
+                onEvent(SourceEvent {TotalRecovery {}});
+                return;
+            }
+            if (glimpse_.stage == GlimpseState::Stage::Idle)
+            {
+                startGlimpseConnect();
+            }
+        }
+
         AfXdpConfig config_;
         std::shared_ptr<Logger> logger_;
 
@@ -1171,6 +1529,10 @@ namespace alpdaq::network
         bool restartRequested_ = false;
         /// Set when GapRecovery's drain completes; the next poll emits RecoveryComplete.
         bool recoveryCompletePending_ = false;
+        /// Set when handleLoginAccepted updates currentSession_.
+        bool sessionChangePending_ = false;
+        /// Single-shot gate so we emit TotalRecovery exactly once per snapshot episode.
+        bool totalRecoveryEmitted_ = false;
         /// Session bytes of the most recently emitted SessionChanged event. All-zero
         /// before the first packet ever.
         std::array<uint8_t, 10> currentSession_ {};
@@ -1200,10 +1562,15 @@ namespace alpdaq::network
         bool rewindRecvPosted_ = false;
         /// Receive buffer for rewind responses; sized for one MoldUDP packet.
         std::array<std::byte, 2048> rewindRxBuf_ {};
-        /// Stable backing storage for in-flight rewind request packets. A ring
-        /// sized such that the io_uring SQE always holds a pointer that outlives the submission.
+        /// Stable backing storage for in-flight rewind request packets.
         std::vector<std::array<std::byte, 20>> rewindTxPool_;
         uint32_t rewindTxIdx_ = 0;
+        /// True iff a recv on glimpseFd_ is currently outstanding in io_uring.
+        bool glimpseRecvPosted_ = false;
+        std::array<std::byte, 49> glimpseLoginTxBuf_ {};
+        std::array<std::byte, 3> glimpseHeartbeatTxBuf_ {};
+        /// Stable sockaddr for the io_uring connect to the GLIMPSE server.
+        sockaddr_in glimpseConnectAddr_ {};
 
         std::chrono::steady_clock::time_point lastRequest_;
         GlimpseState glimpse_;
