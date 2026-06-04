@@ -251,36 +251,6 @@ namespace alpdaq::network
         SnapshotRecovery
     };
 
-    export template<typename T>
-    concept SourceLogger = requires(T& t, uint64_t seq, uint16_t count) {
-        /// A hole was detected: the messages in [seq, seq + count) are missing.
-        t.logGapDetected(seq, count);
-        /// A retransmission request was sent to the rewind server for [seq, seq + count).
-        t.logRewindRequest(seq, count);
-        /// An outstanding retransmission request timed out and is being retried.
-        t.logRewindTimeout();
-        /// A full (GLIMPSE) snapshot recovery has begun.
-        t.logSnapshotStart();
-        /// A snapshot completed; the live feed resumes from sequence number seq.
-        t.logSnapshotComplete(seq);
-        /// The recovery buffer overflowed, escalating gap recovery to total recovery.
-        t.logBufferOverflow();
-        /// An irrecoverable transport error occurred on the feed.
-        t.logFeedError();
-    };
-
-    /// A no-op SourceLogger, useful as a default and in tests/benchmarks.
-    export struct NullSourceLogger
-    {
-        void logGapDetected(uint64_t, uint16_t) noexcept {}
-        void logRewindRequest(uint64_t, uint16_t) noexcept {}
-        void logRewindTimeout() noexcept {}
-        void logSnapshotStart() noexcept {}
-        void logSnapshotComplete(uint64_t) noexcept {}
-        void logBufferOverflow() noexcept {}
-        void logFeedError() noexcept {}
-    };
-
     struct RxCursor
     {
         uint32_t idx = 0;
@@ -1299,7 +1269,7 @@ namespace alpdaq::network
         {
             switch (type)
             {
-                case 'L':  // Login Accepted
+                case 'A':  // Login Accepted
                     handleLoginAccepted(payload);
                     break;
                 case 'J':  // Login Rejected

@@ -1,0 +1,3 @@
+[submodule "avalanche"]
+	path = avalanche
+	url = git@github.com:benaepli/avalanche.git

@@ -14,10 +14,12 @@ export module alpdaq.logging.file;
 import alpdaq.internal;
 import alpdaq.logging.logger;
 import alpdaq.logging.messages;
+import alpdaq.network;
 import alpdaq.system.state;
 
 namespace alpdaq::logging
 {
+    // System-level events (driven by alpdaq::SystemLogger).
     export struct PreMarketStarted
     {
     };
@@ -53,17 +55,52 @@ namespace alpdaq::logging
     {
     };
 
-    export using SystemData = std::variant<PreMarketStarted,
-                                           GapRecoveryStarted,
-                                           TotalRecoveryStarted,
-                                           RecoveryCompleted,
-                                           ForceRestartTriggered,
-                                           SessionChange,
-                                           SessionRotated,
-                                           InconsistencyDetected,
-                                           FatalInconsistency,
-                                           SystemStarted,
-                                           SystemStopped>;
+    // Source-level events (driven by alpdaq::network::SourceLogger).
+    export struct GapDetected
+    {
+        uint64_t seq;
+        uint16_t count;
+    };
+    export struct RewindRequested
+    {
+        uint64_t seq;
+        uint16_t count;
+    };
+    export struct RewindTimedOut
+    {
+    };
+    export struct SnapshotStarted
+    {
+    };
+    export struct SnapshotCompleted
+    {
+        uint64_t seq;
+    };
+    export struct BufferOverflowed
+    {
+    };
+    export struct FeedError
+    {
+    };
+
+    export using LogData = std::variant<PreMarketStarted,
+                                        GapRecoveryStarted,
+                                        TotalRecoveryStarted,
+                                        RecoveryCompleted,
+                                        ForceRestartTriggered,
+                                        SessionChange,
+                                        SessionRotated,
+                                        InconsistencyDetected,
+                                        FatalInconsistency,
+                                        SystemStarted,
+                                        SystemStopped,
+                                        GapDetected,
+                                        RewindRequested,
+                                        RewindTimedOut,
+                                        SnapshotStarted,
+                                        SnapshotCompleted,
+                                        BufferOverflowed,
+                                        FeedError>;
 
     constexpr std::string_view levelTag(Level level)
     {
@@ -79,14 +116,13 @@ namespace alpdaq::logging
         return "UNKNOWN";
     }
 
-    export void writeSystemMessage(std::ostream& os, Message<SystemData> const& msg)
+    export void writeMessage(std::ostream& os, Message<LogData> const& msg)
     {
         using internal::Overloaded;
         auto tag = levelTag(msg.level);
         std::visit(
             Overloaded {
-                [&](PreMarketStarted const&)
-                { std::print(os, "[{}] pre-market started\n", tag); },
+                [&](PreMarketStarted const&) { std::print(os, "[{}] pre-market started\n", tag); },
                 [&](GapRecoveryStarted const&)
                 { std::print(os, "[{}] gap recovery started\n", tag); },
                 [&](TotalRecoveryStarted const&)
@@ -118,6 +154,18 @@ namespace alpdaq::logging
                 { std::print(os, "[{}] fatal inconsistency detected\n", tag); },
                 [&](SystemStarted const&) { std::print(os, "[{}] system started\n", tag); },
                 [&](SystemStopped const&) { std::print(os, "[{}] system stopped\n", tag); },
+                [&](GapDetected const& e)
+                { std::print(os, "[{}] gap detected: seq={} count={}\n", tag, e.seq, e.count); },
+                [&](RewindRequested const& e)
+                { std::print(os, "[{}] rewind requested: seq={} count={}\n", tag, e.seq, e.count); },
+                [&](RewindTimedOut const&) { std::print(os, "[{}] rewind timed out\n", tag); },
+                [&](SnapshotStarted const&)
+                { std::print(os, "[{}] snapshot recovery started\n", tag); },
+                [&](SnapshotCompleted const& e)
+                { std::print(os, "[{}] snapshot complete: resume seq={}\n", tag, e.seq); },
+                [&](BufferOverflowed const&)
+                { std::print(os, "[{}] recovery buffer overflow\n", tag); },
+                [&](FeedError const&) { std::print(os, "[{}] feed error\n", tag); },
             },
             msg.data);
     }
@@ -127,16 +175,16 @@ namespace alpdaq::logging
         { f(msg) } -> std::same_as<void>;
     };
 
-    export using SystemFailureHandler = void (*)(Message<SystemData>);
+    export using LogFailureHandler = void (*)(Message<LogData>);
 
-    export template<FailureHandler<SystemData> OnFailure>
+    export template<FailureHandler<LogData> OnFailure>
     struct FileOutput
     {
         std::filesystem::path path;
         OnFailure onFailure;
         std::ofstream stream;
 
-        FileOutput& operator<<(Message<SystemData> msg) noexcept
+        FileOutput& operator<<(Message<LogData> msg) noexcept
         {
             if (!stream.is_open())
             {
@@ -144,7 +192,7 @@ namespace alpdaq::logging
                 return *this;
             }
 
-            writeSystemMessage(stream, msg);
+            writeMessage(stream, msg);
 
             if (stream.fail())
             {
@@ -154,32 +202,27 @@ namespace alpdaq::logging
             return *this;
         }
 
-        static void rotate() noexcept
-        {
-            // No-op.
-        }
+        void rotate() noexcept { stream.flush(); }
     };
 
-    static_assert(OutputSink<FileOutput<SystemFailureHandler>, SystemData>);
+    static_assert(OutputSink<FileOutput<LogFailureHandler>, LogData>);
 
-    export template<FailureHandler<SystemData> OnFailure>
-    class SystemFileLogger
+    /// A file-backed asynchronous logger satisfying both alpdaq::SystemLogger and
+    /// alpdaq::network::SourceLogger, so a single instance can serve the System and the
+    /// AfXdpSource over one queue / one log file.
+    export template<FailureHandler<LogData> OnFailure>
+    class FileLogger
     {
       public:
-        explicit SystemFileLogger(std::shared_ptr<Logger<FileOutput<OnFailure>, SystemData>> logger)
+        explicit FileLogger(std::shared_ptr<Logger<FileOutput<OnFailure>, LogData>> logger)
             : logger_(std::move(logger))
         {
         }
 
-        void logPreMarket()
-        {
-            logger_->tryEnqueueUnchecked({Level::Info, PreMarketStarted {}});
-        }
+        // SystemLogger
+        void logPreMarket() { logger_->tryEnqueueUnchecked({Level::Info, PreMarketStarted {}}); }
 
-        void logGapRecovery()
-        {
-            logger_->tryEnqueueUnchecked({Level::Warn, GapRecoveryStarted {}});
-        }
+        void logGapRecovery() { logger_->tryEnqueueUnchecked({Level::Warn, GapRecoveryStarted {}}); }
 
         void logTotalRecovery()
         {
@@ -217,9 +260,46 @@ namespace alpdaq::logging
 
         void rotateSession() { logger_->flushSession(); }
 
+        // SourceLogger (invoked from AfXdpSource::poll, which is noexcept).
+        void logGapDetected(uint64_t seq, uint16_t count) noexcept
+        {
+            logger_->tryEnqueueUnchecked({Level::Warn, GapDetected {seq, count}});
+        }
+
+        void logRewindRequest(uint64_t seq, uint16_t count) noexcept
+        {
+            logger_->tryEnqueueUnchecked({Level::Info, RewindRequested {seq, count}});
+        }
+
+        void logRewindTimeout() noexcept
+        {
+            logger_->tryEnqueueUnchecked({Level::Warn, RewindTimedOut {}});
+        }
+
+        void logSnapshotStart() noexcept
+        {
+            logger_->tryEnqueueUnchecked({Level::Warn, SnapshotStarted {}});
+        }
+
+        void logSnapshotComplete(uint64_t seq) noexcept
+        {
+            logger_->tryEnqueueUnchecked({Level::Info, SnapshotCompleted {seq}});
+        }
+
+        void logBufferOverflow() noexcept
+        {
+            logger_->tryEnqueueUnchecked({Level::Error, BufferOverflowed {}});
+        }
+
+        void logFeedError() noexcept
+        {
+            logger_->tryEnqueueUnchecked({Level::Error, FeedError {}});
+        }
+
       private:
-        std::shared_ptr<Logger<FileOutput<OnFailure>, SystemData>> logger_;
+        std::shared_ptr<Logger<FileOutput<OnFailure>, LogData>> logger_;
     };
 
-    static_assert(alpdaq::SystemLogger<SystemFileLogger<SystemFailureHandler>>);
+    static_assert(alpdaq::SystemLogger<FileLogger<LogFailureHandler>>);
+    static_assert(alpdaq::network::SourceLogger<FileLogger<LogFailureHandler>>);
 }  // namespace alpdaq::logging

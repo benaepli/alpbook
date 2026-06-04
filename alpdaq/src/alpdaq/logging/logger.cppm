@@ -106,7 +106,7 @@ namespace alpdaq::logging
                     continue;
                 }
 
-                if (Message<Data>* msg = std::get_if<Message>(&top.entry))
+                if (Message<Data>* msg = std::get_if<Message<Data>>(&top.entry))
                 {
                     output_ << *msg;
                 }
@@ -131,7 +131,7 @@ namespace alpdaq::logging
         /// there is a possibility this function may succeed without producing any logs.
         bool tryEnqueueUnchecked(Message<Data> m) noexcept
         {
-            return queue_.try_enqueue(LogEntry {.entry = m});
+            return queue_.try_enqueue(LogEntry<Data> {.entry = m});
         }
 
         void flushSession() noexcept

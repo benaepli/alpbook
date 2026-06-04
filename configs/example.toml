@@ -1,0 +1,48 @@
+# Example alpdaq configuration for the live AF_XDP (NASDAQ TotalView-ITCH) source.
+#
+# Run with:  alpdaq configs/example.toml
+#
+# Opening the AF_XDP source requires root / CAP_NET_RAW, a real NIC interface
+# bound to the given RX queue, and a live multicast feed plus reachable rewind and
+# GLIMPSE servers. Without those, config parsing still succeeds and the binary fails
+# cleanly at AfXdpSource::open.
+
+# Symbols to subscribe to (max 8 chars each).
+stocks = ["AAPL", "MSFT", "TSLA"]
+
+# Directory for the asynchronous log file (alpdaq.log is written inside it).
+log_dir = "logs"
+
+# CPU pinning for the two threads. Each accepts an integer core index, "auto"
+# (first available PU), or "none" (no pinning).
+[pinning]
+main_thread = 2
+log_thread = "auto"
+
+[data]
+source = "network"
+
+[network]
+# Live multicast feed.
+interface = "eth0"
+queue_id = 0
+multicast_group = "233.54.12.111:18000"
+# Optional source-specific multicast filter (IGMPv3 SSM). Omit for any-source.
+# multicast_source = "206.200.100.1"
+
+# Recovery transports.
+rewind_server = "206.200.100.50:18500"
+glimpse_server = "206.200.100.60:18600"
+glimpse_username = "USER01"
+glimpse_password = "SECRET"
+
+# Optional tuning (defaults shown; all may be omitted).
+# frame_size = 2048
+# fill_ring_size = 4096
+# rx_ring_size = 4096
+# rx_batch = 32
+# sq_entries = 256
+# cq_entries = 512
+# recovery_buffer_slots = 65536
+# rewind_timeout_ns = 500000
+# glimpse_connect_timeout_ns = 2000000000
