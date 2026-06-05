@@ -25,7 +25,7 @@ The default implementation provides:
 
 - The `System` class (obviously). Handles the ITCH state machine throughout the various phases of a session,
   while also managing error and gap recovery, halts, and stock mappings.
-- A lock-free, asynchronous logging system `Logger` run on a separate pinned thread.
+- A lock-free, asynchronous logging system and network `Logger` run on a separate pinned thread.
 
 Note: this is a personal exploration of trading systems and is not tested for non-simulated environments (yet).
 

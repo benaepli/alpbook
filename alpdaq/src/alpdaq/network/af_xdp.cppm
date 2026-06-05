@@ -148,6 +148,11 @@ namespace alpdaq::network
         std::chrono::nanoseconds glimpseConnectTimeout {2000'000'000};
 
         uint64_t recoveryBufferSlots = 1 << 16;
+
+        /// When the live feed resumes during snapshot recovery, the recovery window is
+        /// opened this many sequences below the first observed live sequence to absorb
+        /// UDP reordering near the join. Must be smaller than recoveryBufferSlots.
+        uint64_t recoverySnapshotReorderMargin = 64;
     };
 
     struct alignas(std::hardware_constructive_interference_size) Slot
@@ -224,6 +229,23 @@ namespace alpdaq::network
             return std::span<std::byte const>(slot.data.data(), slot.len);
         }
 
+        /// Clears any occupied slots in [base, newExpected) without delivering them
+        /// (they are subsumed by a snapshot image). base is unchanged; this only keeps
+        /// count consistent so closeEpisode can still reach zero.
+        void discardBelow(uint64_t newExpected) noexcept
+        {
+            assert(base && newExpected >= *base);
+            uint64_t const limit = std::min<uint64_t>(newExpected - *base, span);
+            for (uint64_t idx = 0; idx < limit; ++idx)
+            {
+                if (occupied[idx])
+                {
+                    occupied[idx] = false;
+                    --count;
+                }
+            }
+        }
+
         /// End an episode after delivery has cleared everything.
         void closeEpisode() noexcept
         {
@@ -272,10 +294,11 @@ namespace alpdaq::network
         };
 
         Stage stage = Stage::Idle;
-        /// Sequence number to assign to the next incoming SoupBinTCP data packet.
-        uint64_t nextSnapshotSeq = 0;
         std::vector<std::byte> rxBuffer;
         size_t rxLength = 0;
+        /// Bytes already dispatched downstream but not yet physically reclaimed from the
+        /// front of rxBuffer.
+        size_t dispatchOffset = 0;
     };
 
     /// A whole MoldUDP64 packet ready.
@@ -374,12 +397,6 @@ namespace alpdaq::network
                 onEvent(SourceEvent {RecoveryComplete {}});
                 return;
             }
-            if (sessionChangePending_)
-            {
-                sessionChangePending_ = false;
-                onEvent(SourceEvent {SessionChanged {currentSession_}});
-                return;
-            }
 
             serviceUringCq();
 
@@ -424,6 +441,7 @@ namespace alpdaq::network
                     || !std::has_single_bit(live.fillRingSize)
                     || !std::has_single_bit(live.rxRingSize) || live.rxBatch == 0
                     || live.rxBatch > live.rxRingSize || config.recoveryBufferSlots == 0
+                    || config.recoverySnapshotReorderMargin >= config.recoveryBufferSlots
                     || config.recoveryConfig.sqEntries == 0)
                 {
                     return std::unexpected(OpenError::InvalidConfig);
@@ -579,6 +597,7 @@ namespace alpdaq::network
             // Pre-allocate the recv buffer and build the heartbeat.
             glimpse_.rxBuffer.resize(16384);
             glimpse_.rxLength = 0;
+            glimpse_.dispatchOffset = 0;
             {
                 uint16_t const hbLen = std::byteswap(static_cast<uint16_t>(1));
                 std::memcpy(glimpseHeartbeatTxBuf_.data(), &hbLen, 2);
@@ -630,9 +649,13 @@ namespace alpdaq::network
 
         /// Parse ETH (optionally one 802.1Q VLAN tag) + IPv4 (no options) + UDP from a
         /// captured frame and return a span over the UDP payload. Returns std::nullopt on any
-        /// validation failure.
-        static std::optional<std::span<std::byte const>> parseUdpPayload(std::byte const* frame,
-                                                                         std::size_t len) noexcept
+        /// validation failure, including a destination that is not the feed's multicast
+        /// group:port.
+        static std::optional<std::span<std::byte const>> parseUdpPayload(
+            std::byte const* frame,
+            std::size_t len,
+            std::array<uint8_t, 4> const& group,
+            uint16_t port) noexcept
         {
             constexpr std::size_t ethHeaderSize = 14;
             if (len < ethHeaderSize)
@@ -674,9 +697,19 @@ namespace alpdaq::network
             {
                 return std::nullopt;
             }
+            if (std::memcmp(frame + offset + 16, group.data(), group.size()) != 0)
+            {
+                return std::nullopt;
+            }
             offset += 20;
 
             if (len < offset + 8)
+            {
+                return std::nullopt;
+            }
+            uint16_t dport = 0;
+            std::memcpy(&dport, frame + offset + 2, 2);
+            if (std::byteswap(dport) != port)
             {
                 return std::nullopt;
             }
@@ -745,7 +778,9 @@ namespace alpdaq::network
                 xdp_desc const* desc =
                     xsk_ring_cons__rx_desc(&rxRing_, rxCursor_.idx + rxCursor_.processed);
                 std::byte const* frame = umemArea_.data() + desc->addr;
-                auto udpPayload = parseUdpPayload(frame, desc->len);
+                auto const& feed = config_.liveConfig.feed;
+                auto udpPayload =
+                    parseUdpPayload(frame, desc->len, feed.group.address, feed.group.port);
                 if (!udpPayload)
                 {
                     advancePacket();
@@ -881,7 +916,6 @@ namespace alpdaq::network
             rxCursor_.msgOffset = 0;
             rxCursor_.msgRemain = 0;
             recoveryCompletePending_ = false;
-            sessionChangePending_ = false;
             totalRecoveryEmitted_ = false;
 
             if (glimpseFd_ >= 0)
@@ -890,8 +924,8 @@ namespace alpdaq::network
                 glimpseFd_ = -1;
             }
             glimpse_.stage = GlimpseState::Stage::Idle;
-            glimpse_.nextSnapshotSeq = 0;
             glimpse_.rxLength = 0;
+            glimpse_.dispatchOffset = 0;
             glimpseRecvPosted_ = false;
 
             phase_ = Phase::SnapshotRecovery;
@@ -912,8 +946,11 @@ namespace alpdaq::network
                 {
                     break;
                 }
-                // Drop messages below the episode base.
-                if (buffer_.base && msg->sequenceNumber < *buffer_.base)
+                // Drop messages below the window's live floor: anything below the base
+                // (would break insert's index) or already delivered (< expected_, which
+                // would re-occupy and leak count). expected_ is 0 while speculatively
+                // buffering during snapshot recovery, so only the base bound applies then.
+                if (buffer_.base && msg->sequenceNumber < std::max(*buffer_.base, expected_))
                 {
                     continue;
                 }
@@ -928,14 +965,15 @@ namespace alpdaq::network
         }
 
         /// Scans the buffer's occupied bitmap and submits a fresh rewind request for
-        /// every unoccupied run in [0, span). Splits runs larger than 0xFFFF.
+        /// every unoccupied run in [expected_ - base, span). Splits runs larger than
+        /// 0xFFFF.
         void rescanAndResubmit() noexcept
         {
             if (!buffer_.base)
             {
                 return;
             }
-            uint64_t i = 0;
+            uint64_t i = expected_ > *buffer_.base ? expected_ - *buffer_.base : 0;
             while (i < buffer_.span)
             {
                 if (buffer_.occupied[i])
@@ -991,8 +1029,9 @@ namespace alpdaq::network
             }
         }
 
-        /// Handles a rewind recv completion: ingests the response (only while in
-        /// GapRecovery with an open buffer) and re-posts the recv.
+        /// Handles a rewind recv completion: ingests the response (whenever a recovery
+        /// window is open, including the speculative window during snapshot recovery)
+        /// and re-posts the recv.
         void handleRewindRecv(int res) noexcept
         {
             rewindRecvPosted_ = false;
@@ -1000,7 +1039,7 @@ namespace alpdaq::network
             {
                 logger_->logFeedError();
             }
-            else if (res > 0 && phase_ == Phase::GapRecovery && buffer_.base)
+            else if (res > 0 && buffer_.base)
             {
                 ingestRewindResponse(std::span(rewindRxBuf_.data(), static_cast<size_t>(res)));
             }
@@ -1041,7 +1080,14 @@ namespace alpdaq::network
                 {
                     break;
                 }
-                if (!buffer_.insert(firstSeq + i, decoded->payload))
+                uint64_t const seq = firstSeq + i;
+                // Drop fills below the live floor.
+                if (seq < std::max(*buffer_.base, expected_))
+                {
+                    offset = decoded->next;
+                    continue;
+                }
+                if (!buffer_.insert(seq, decoded->payload))
                 {
                     logger_->logBufferOverflow();
                     enterSnapshotRecovery();
@@ -1114,12 +1160,13 @@ namespace alpdaq::network
             {
                 buf[i] = std::byte {' '};
             }
-            // Requested sequence: "0" right-justified in 20 ASCII bytes is snapshot.
+            // Requested sequence: GLIMPSE requires login at sequence 1 ("1"
+            // right-justified in 20 ASCII bytes) to receive the snapshot spin.
             for (size_t i = 29; i < 48; ++i)
             {
                 buf[i] = std::byte {' '};
             }
-            buf[48] = std::byte {'0'};
+            buf[48] = std::byte {'1'};
 
             io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
             if (sqe == nullptr)
@@ -1151,15 +1198,24 @@ namespace alpdaq::network
             io_uring_submit(&ring_);
         }
 
-        /// Posts a recv on glimpseFd_ if one is not already outstanding. Buffer pointer
-        /// is data() + rxLength (stable across the recv's lifetime since rxBuffer is
-        /// pre-sized and never reallocated, and ingest's memmove only runs after
-        /// completion).
+        /// Posts a recv on glimpseFd_ if one is not already outstanding
         void ensureGlimpseRecvPosted() noexcept
         {
             if (glimpseRecvPosted_ || glimpseFd_ < 0)
             {
                 return;
+            }
+            // Reclaim bytes already dispatched downstream. Safe: no recv is outstanding.
+            if (glimpse_.dispatchOffset > 0)
+            {
+                if (glimpse_.dispatchOffset < glimpse_.rxLength)
+                {
+                    std::memmove(glimpse_.rxBuffer.data(),
+                                 glimpse_.rxBuffer.data() + glimpse_.dispatchOffset,
+                                 glimpse_.rxLength - glimpse_.dispatchOffset);
+                }
+                glimpse_.rxLength -= glimpse_.dispatchOffset;
+                glimpse_.dispatchOffset = 0;
             }
             if (glimpse_.rxLength >= glimpse_.rxBuffer.size())
             {
@@ -1204,8 +1260,11 @@ namespace alpdaq::network
             }
         }
 
-        /// Appends new bytes to rxBuffer, ingests any complete SoupBin frames,
-        /// and re-posts the recv if the connection is still alive.
+        /// Appends new bytes to rxBuffer and re-posts the recv if the connection is still
+        /// alive. Dispatch is deferred to pollSnapshotRecovery, which drains exactly one
+        /// frame per poll (ingestOneSoupBinFrame); this keeps the rx buffer accumulation
+        /// decoupled from message delivery so each snapshot message is judged by the
+        /// state handler the previous message transitioned into.
         void handleGlimpseRecv(int res) noexcept
         {
             glimpseRecvPosted_ = false;
@@ -1220,18 +1279,18 @@ namespace alpdaq::network
                 return;
             }
             glimpse_.rxLength += static_cast<size_t>(res);
-            ingestSoupBinFrames();
             if (glimpse_.stage != GlimpseState::Stage::Done && glimpseFd_ >= 0)
             {
                 ensureGlimpseRecvPosted();
             }
         }
 
-        /// Walks the rxBuffer, dispatching every complete SoupBinTCP frame to
-        /// handleSoupBinFrame and sliding any partial tail back to the start.
-        void ingestSoupBinFrames() noexcept
+        /// Dispatches at most one complete SoupBinTCP frame to handleSoupBinFrame and
+        /// advances the dispatch cursor past it; returns true iff a frame was dispatched.
+        template<typename DataCb, typename EventCb>
+        bool ingestOneSoupBinFrame(DataCb& onData, EventCb& onEvent) noexcept
         {
-            size_t offset = 0;
+            size_t offset = glimpse_.dispatchOffset;
             while (offset + 2 <= glimpse_.rxLength)
             {
                 uint16_t lenBe = 0;
@@ -1239,6 +1298,7 @@ namespace alpdaq::network
                 uint16_t const frameLen = std::byteswap(lenBe);
                 if (frameLen == 0)
                 {
+                    // Skip empty framing bytes; they carry no message.
                     offset += 2;
                     continue;
                 }
@@ -1249,57 +1309,55 @@ namespace alpdaq::network
                 uint8_t const type = std::to_integer<uint8_t>(glimpse_.rxBuffer[offset + 2]);
                 auto const payload = std::span<std::byte const>(
                     glimpse_.rxBuffer.data() + offset + 3, static_cast<size_t>(frameLen - 1));
-                handleSoupBinFrame(type, payload);
-                offset += 2 + frameLen;
+                glimpse_.dispatchOffset = offset + 2 + frameLen;
+                handleSoupBinFrame(type, payload, onData, onEvent);
+                return true;
             }
-            if (offset > 0)
-            {
-                if (offset < glimpse_.rxLength)
-                {
-                    std::memmove(glimpse_.rxBuffer.data(),
-                                 glimpse_.rxBuffer.data() + offset,
-                                 glimpse_.rxLength - offset);
-                }
-                glimpse_.rxLength -= offset;
-            }
+            glimpse_.dispatchOffset = offset;
+            return false;
         }
 
-        /// Dispatches a SoupBinTCP frame by type.
-        void handleSoupBinFrame(uint8_t type, std::span<std::byte const> payload) noexcept
+        /// Dispatches a SoupBinTCP frame by type. Snapshot state messages are emitted
+        /// straight downstream as data; the trailing End of Snapshot ITCH message ('G')
+        /// resumes the live feed at its reported sequence.
+        template<typename DataCb, typename EventCb>
+        void handleSoupBinFrame(uint8_t type,
+                                std::span<std::byte const> payload,
+                                DataCb& onData,
+                                EventCb& onEvent) noexcept
         {
             switch (type)
             {
                 case 'A':  // Login Accepted
-                    handleLoginAccepted(payload);
+                    handleLoginAccepted(payload, onEvent);
                     break;
                 case 'J':  // Login Rejected
                     logger_->logFeedError();
                     break;
-                case 'S':  // Sequenced Data
-                    if (glimpse_.stage == GlimpseState::Stage::Snapshot && buffer_.base)
+                case 'S':  // Sequenced Data: one ITCH message of snapshot state.
+                    if (glimpse_.stage != GlimpseState::Stage::Snapshot || payload.empty())
                     {
-                        if (!buffer_.insert(glimpse_.nextSnapshotSeq, payload))
-                        {
-                            logger_->logBufferOverflow();
-                        }
-                        else
-                        {
-                            ++glimpse_.nextSnapshotSeq;
-                        }
+                        break;
+                    }
+                    if (std::to_integer<uint8_t>(payload[0]) == 'G')
+                    {
+                        finishSnapshot(parseEndOfSnapshotSeq(payload));
+                    }
+                    else
+                    {
+                        onData(ItchView {.payload = payload});
                     }
                     break;
                 case 'H':  // Server Heartbeat
                     sendGlimpseHeartbeat();
                     break;
-                case 'Z':  // End of Session
-                    glimpse_.stage = GlimpseState::Stage::Done;
-                    rescanAndResubmit();
-                    logger_->logSnapshotComplete(glimpse_.nextSnapshotSeq);
+                case 'Z':  // End of Session: teardown after the snapshot finished.
                     if (glimpseFd_ >= 0)
                     {
                         ::close(glimpseFd_);
                         glimpseFd_ = -1;
                     }
+                    glimpse_.stage = GlimpseState::Stage::Done;
                     break;
                 case '+':
                 default:
@@ -1307,46 +1365,79 @@ namespace alpdaq::network
             }
         }
 
-        /// Parses a login accepted message,
-        /// anchors the recovery buffer at the snapshot's first sequence, flips into
-        /// GapRecovery, and defers the SessionChanged event to the next poll.
-        void handleLoginAccepted(std::span<std::byte const> payload) noexcept
+        /// Parses the 20-byte ASCII numeric sequence from a GLIMPSE End of Snapshot ('G')
+        /// ITCH message (type byte at payload[0], sequence at payload[1..21]).
+        static uint64_t parseEndOfSnapshotSeq(std::span<std::byte const> payload) noexcept
         {
-            if (payload.size() < 30)
+            size_t const n = std::min<size_t>(20, payload.size() > 1 ? payload.size() - 1 : 0);
+            char buf[20] = {};
+            for (size_t i = 0; i < n; ++i)
+            {
+                buf[i] = static_cast<char>(std::to_integer<uint8_t>(payload[1 + i]));
+            }
+            char const* p = buf;
+            while (p < buf + n && *p == ' ')
+            {
+                ++p;
+            }
+            uint64_t seq = 0;
+            std::from_chars(p, buf + n, seq);
+            return seq;
+        }
+
+        /// Parses a SoupBinTCP Login Accepted: records the session, advances to the
+        /// snapshot stage, and emits SessionChanged (before any snapshot data). The
+        /// recovery window is left closed; it is anchored from the live feed once it
+        /// resumes (see pollSnapshotRecovery).
+        template<typename EventCb>
+        void handleLoginAccepted(std::span<std::byte const> payload, EventCb& onEvent) noexcept
+        {
+            if (payload.size() < 10)
             {
                 logger_->logFeedError();
                 return;
             }
-            std::array<uint8_t, 10> session;
-            std::memcpy(session.data(), payload.data(), 10);
+            std::memcpy(currentSession_.data(), payload.data(), 10);
 
-            char buf[21] = {};
-            for (size_t i = 0; i < 20; ++i)
-            {
-                buf[i] = static_cast<char>(std::to_integer<uint8_t>(payload[10 + i]));
-            }
-            char const* p = buf;
-            while (p < buf + 20 && *p == ' ')
-            {
-                ++p;
-            }
-            uint64_t startSeq = 0;
-            std::from_chars(p, buf + 20, startSeq);
-
-            currentSession_ = session;
-            expected_ = startSeq;
-            glimpse_.nextSnapshotSeq = startSeq;
-
-            if (buffer_.base)
-            {
-                buffer_.abortEpisode();
-            }
-            buffer_.openEpisode(startSeq);
-
-            sessionChangePending_ = true;
             glimpse_.stage = GlimpseState::Stage::Snapshot;
-            phase_ = Phase::GapRecovery;
             logger_->logSnapshotStart();
+            onEvent(SourceEvent {SessionChanged {currentSession_}});
+        }
+
+        /// Handles the end of snapshot. Resumes the live feed at exactly
+        /// resumeSeq (the snapshot image subsumes everything below it), reconciling the
+        /// speculative recovery window opened while the spin was downloading.
+        void finishSnapshot(uint64_t resumeSeq) noexcept
+        {
+            if (!buffer_.base)
+            {
+                buffer_.openEpisode(resumeSeq);
+            }
+            else if (*buffer_.base <= resumeSeq)
+            {
+                // Common case: anchored a margin below the resume point. Discard the
+                // [base, resumeSeq) slots, which the snapshot image already covers.
+                buffer_.discardBelow(resumeSeq);
+            }
+            else
+            {
+                // First live observed more than the reorder margin past the resume
+                // point, so the window's base sits above it. Re-anchor at resumeSeq.
+                buffer_.abortEpisode();
+                buffer_.openEpisode(resumeSeq);
+            }
+            expected_ = resumeSeq;
+
+            rescanAndResubmit();
+            ensureRewindRecvPosted();
+            phase_ = Phase::GapRecovery;
+            glimpse_.stage = GlimpseState::Stage::Done;
+            logger_->logSnapshotComplete(resumeSeq);
+            if (glimpseFd_ >= 0)
+            {
+                ::close(glimpseFd_);
+                glimpseFd_ = -1;
+            }
         }
 
         template<typename DataCb, typename EventCb>
@@ -1369,7 +1460,23 @@ namespace alpdaq::network
 
                 if (expected_ != 0 && pkt->sequenceNumber != expected_)
                 {
+                    // Drop duplicates.
+                    if (pkt->sequenceNumber < expected_)
+                    {
+                        advancePacket();
+                        return;
+                    }
+
                     uint64_t const totalMissing = pkt->sequenceNumber - expected_;
+
+                    // A gap wider than the recovery window can never be filled by buffered
+                    // rewinds (the buffer cannot even hold it).
+                    if (totalMissing >= buffer_.slots.size())
+                    {
+                        enterSnapshotRecovery();
+                        return;
+                    }
+
                     logger_->logGapDetected(
                         expected_,
                         static_cast<uint16_t>(std::min<uint64_t>(totalMissing, 0xFFFFu)));
@@ -1408,7 +1515,64 @@ namespace alpdaq::network
                 return;
             }
             expected_ = msg->sequenceNumber + 1;
-            onData(ItchView {.sequenceNumber = msg->sequenceNumber, .payload = msg->payload});
+            onData(ItchView {.payload = msg->payload});
+        }
+
+        /// Buffers one live packet into the open recovery window: validates the session,
+        /// escalates on window overflow, requests any newly exposed gap beyond the write
+        /// frontier, and stores the packet's messages. Returns false (and the caller
+        /// should return) if it escalated to snapshot recovery.
+        bool bufferLivePacket(FullMessage const& pkt) noexcept
+        {
+            assert(buffer_.base);
+
+            if (pkt.session != currentSession_)
+            {
+                enterSnapshotRecovery();
+                return false;
+            }
+
+            uint64_t const writeFrontier = *buffer_.base + buffer_.span;
+            if (pkt.sequenceNumber > writeFrontier)
+            {
+                // The packet lands beyond the recovery window.
+                if (pkt.sequenceNumber - *buffer_.base >= buffer_.slots.size())
+                {
+                    enterSnapshotRecovery();
+                    return false;
+                }
+
+                uint64_t const newGapLength = pkt.sequenceNumber - writeFrontier;
+                uint64_t off = 0;
+                while (off < newGapLength)
+                {
+                    uint16_t const chunk =
+                        static_cast<uint16_t>(std::min<uint64_t>(newGapLength - off, 0xFFFFu));
+                    submitRewindRequest(writeFrontier + off, chunk);
+                    off += chunk;
+                }
+                ensureRewindRecvPosted();
+                logger_->logGapDetected(
+                    writeFrontier,
+                    static_cast<uint16_t>(std::min<uint64_t>(newGapLength, 0xFFFFu)));
+            }
+
+            return bufferEntirePacket(pkt);
+        }
+
+        /// Re-requests outstanding gaps if the rewinds have gone quiet past the timeout.
+        void resubmitOnTimeout() noexcept
+        {
+            if (!buffer_.base)
+            {
+                return;
+            }
+            auto const now = std::chrono::steady_clock::now();
+            if (now - lastRequest_ > config_.rewindTimeout)
+            {
+                rescanAndResubmit();
+                logger_->logRewindTimeout();
+            }
         }
 
         template<typename DataCb, typename EventCb>
@@ -1419,65 +1583,31 @@ namespace alpdaq::network
             // First, we try to drain.
             if (auto const payload = buffer_.tryDeliver(expected_))
             {
-                uint64_t const seq = expected_++;
+                ++expected_;
                 if (buffer_.count == 0)
                 {
                     buffer_.closeEpisode();
                     phase_ = Phase::Streaming;
                     recoveryCompletePending_ = true;
                 }
-                onData(ItchView {.sequenceNumber = seq, .payload = *payload});
+                onData(ItchView {.payload = *payload});
                 return;
             }
 
             // Then we buffer one live packet if available and detect new gaps.
             if (auto pkt = peekPacket())
             {
-                if (pkt->session != currentSession_)
-                {
-                    enterSnapshotRecovery();
-                    return;
-                }
-
-                uint64_t const writeFrontier = *buffer_.base + buffer_.span;
-                if (pkt->sequenceNumber > writeFrontier)
-                {
-                    uint64_t const newGapLength = pkt->sequenceNumber - writeFrontier;
-                    uint64_t off = 0;
-                    while (off < newGapLength)
-                    {
-                        uint16_t const chunk =
-                            static_cast<uint16_t>(std::min<uint64_t>(newGapLength - off, 0xFFFFu));
-                        submitRewindRequest(writeFrontier + off, chunk);
-                        off += chunk;
-                    }
-                    logger_->logGapDetected(
-                        writeFrontier,
-                        static_cast<uint16_t>(std::min<uint64_t>(newGapLength, 0xFFFFu)));
-                }
-
-                if (!bufferEntirePacket(*pkt))
+                if (!bufferLivePacket(*pkt))
                 {
                     return;
                 }
             }
 
-            // Timeout for runs.
-            if (buffer_.base)
-            {
-                auto const now = std::chrono::steady_clock::now();
-                if (now - lastRequest_ > config_.rewindTimeout)
-                {
-                    rescanAndResubmit();
-                    logger_->logRewindTimeout();
-                }
-            }
+            resubmitOnTimeout();
         }
 
-        /// SnapshotRecovery body. Emits TotalRecovery once on entry, kicks off the
-        /// GLIMPSE connect, then idles. Actual work is done in the receive handler.
         template<typename DataCb, typename EventCb>
-        void pollSnapshotRecovery(DataCb /*onData*/, EventCb onEvent) noexcept
+        void pollSnapshotRecovery(DataCb onData, EventCb onEvent) noexcept
         {
             if (!totalRecoveryEmitted_)
             {
@@ -1488,7 +1618,39 @@ namespace alpdaq::network
             if (glimpse_.stage == GlimpseState::Stage::Idle)
             {
                 startGlimpseConnect();
+                return;
             }
+
+            // Deliver at most one buffered snapshot frame per poll, before the stage gate.
+            if (ingestOneSoupBinFrame(onData, onEvent))
+            {
+                ensureGlimpseRecvPosted();
+                return;
+            }
+
+            if (glimpse_.stage != GlimpseState::Stage::Snapshot)
+            {
+                // Still connecting/logging in; re-arm the recv in case it stalled.
+                ensureGlimpseRecvPosted();
+                return;
+            }
+
+            if (auto pkt = peekPacket())
+            {
+                if (!buffer_.base)
+                {
+                    uint64_t const margin = config_.recoverySnapshotReorderMargin;
+                    uint64_t const anchor =
+                        pkt->sequenceNumber > margin ? pkt->sequenceNumber - margin : 0;
+                    buffer_.openEpisode(anchor);
+                }
+                if (!bufferLivePacket(*pkt))
+                {
+                    return;
+                }
+            }
+
+            resubmitOnTimeout();
         }
 
         AfXdpConfig config_;
@@ -1499,8 +1661,6 @@ namespace alpdaq::network
         bool restartRequested_ = false;
         /// Set when GapRecovery's drain completes; the next poll emits RecoveryComplete.
         bool recoveryCompletePending_ = false;
-        /// Set when handleLoginAccepted updates currentSession_.
-        bool sessionChangePending_ = false;
         /// Single-shot gate so we emit TotalRecovery exactly once per snapshot episode.
         bool totalRecoveryEmitted_ = false;
         /// Session bytes of the most recently emitted SessionChanged event. All-zero

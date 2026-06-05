@@ -50,10 +50,8 @@ namespace alpdaq::simulated
                 return;
             }
 
-            ++sequenceNumber_;
             auto& slot = *result;
             ItchView view {
-                .sequenceNumber = sequenceNumber_,
                 .payload = std::span<std::byte const>(slot.get().data),
             };
             onData(view);
@@ -61,7 +59,6 @@ namespace alpdaq::simulated
 
         void forceRestart() noexcept
         {
-            sequenceNumber_ = 0;
             needsSessionEvent_ = true;
 
             auto stream = alpbook::itch::ItchStream<>::open(path_);
@@ -88,7 +85,6 @@ namespace alpdaq::simulated
         alpbook::itch::ItchStream<> stream_;
         std::filesystem::path path_;
         SessionId session_;
-        uint64_t sequenceNumber_ = 0;
         bool needsSessionEvent_ = true;
         bool failed_ = false;
     };

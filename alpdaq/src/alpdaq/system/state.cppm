@@ -69,6 +69,10 @@ namespace alpdaq
     export template<typename T>
     concept SystemLogger = requires(T& t, SessionId id) {
         t.logPreMarket();
+        t.logLive();
+        t.logAfterMarket();
+        t.logAfterSystemHours();
+        t.logEndOfDay();
         t.logGapRecovery();
         t.logTotalRecovery();
         t.logRecoveryComplete();
@@ -83,7 +87,6 @@ namespace alpdaq
 
     export struct ItchView
     {
-        uint64_t sequenceNumber;
         std::span<std::byte const> payload;
     };
 }  // namespace alpdaq

@@ -16,3 +16,5 @@ output*
 heaptrack*
 pgo_data
 perf.data*
+target/*
+logs/

@@ -48,6 +48,10 @@ namespace benchmark
         }
 
         void logPreMarket() {}
+        void logLive() {}
+        void logAfterMarket() {}
+        void logAfterSystemHours() {}
+        void logEndOfDay() {}
         void logGapRecovery() {}
         void logTotalRecovery() {}
         void logRecoveryComplete() {}

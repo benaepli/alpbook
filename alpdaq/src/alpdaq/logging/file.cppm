@@ -23,6 +23,18 @@ namespace alpdaq::logging
     export struct PreMarketStarted
     {
     };
+    export struct LiveStarted
+    {
+    };
+    export struct AfterMarketStarted
+    {
+    };
+    export struct AfterSystemHoursStarted
+    {
+    };
+    export struct EndOfDayStarted
+    {
+    };
     export struct GapRecoveryStarted
     {
     };
@@ -84,6 +96,10 @@ namespace alpdaq::logging
     };
 
     export using LogData = std::variant<PreMarketStarted,
+                                        LiveStarted,
+                                        AfterMarketStarted,
+                                        AfterSystemHoursStarted,
+                                        EndOfDayStarted,
                                         GapRecoveryStarted,
                                         TotalRecoveryStarted,
                                         RecoveryCompleted,
@@ -123,6 +139,12 @@ namespace alpdaq::logging
         std::visit(
             Overloaded {
                 [&](PreMarketStarted const&) { std::print(os, "[{}] pre-market started\n", tag); },
+                [&](LiveStarted const&) { std::print(os, "[{}] live started\n", tag); },
+                [&](AfterMarketStarted const&)
+                { std::print(os, "[{}] after-market started\n", tag); },
+                [&](AfterSystemHoursStarted const&)
+                { std::print(os, "[{}] after-system-hours started\n", tag); },
+                [&](EndOfDayStarted const&) { std::print(os, "[{}] end-of-day started\n", tag); },
                 [&](GapRecoveryStarted const&)
                 { std::print(os, "[{}] gap recovery started\n", tag); },
                 [&](TotalRecoveryStarted const&)
@@ -221,6 +243,20 @@ namespace alpdaq::logging
 
         // SystemLogger
         void logPreMarket() { logger_->tryEnqueueUnchecked({Level::Info, PreMarketStarted {}}); }
+
+        void logLive() { logger_->tryEnqueueUnchecked({Level::Info, LiveStarted {}}); }
+
+        void logAfterMarket()
+        {
+            logger_->tryEnqueueUnchecked({Level::Info, AfterMarketStarted {}});
+        }
+
+        void logAfterSystemHours()
+        {
+            logger_->tryEnqueueUnchecked({Level::Info, AfterSystemHoursStarted {}});
+        }
+
+        void logEndOfDay() { logger_->tryEnqueueUnchecked({Level::Info, EndOfDayStarted {}}); }
 
         void logGapRecovery() { logger_->tryEnqueueUnchecked({Level::Warn, GapRecoveryStarted {}}); }
 

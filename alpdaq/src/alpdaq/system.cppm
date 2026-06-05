@@ -223,33 +223,6 @@ namespace alpdaq
         }
 
         template<bool Recovery>
-        SystemState runAwaitingSystemEvent(SystemState currentState,
-                                           ItchSystemEvent expectedEvent,
-                                           SystemState successState) noexcept
-        {
-            return runStateLoop(
-                currentState,
-                [&](std::span<std::byte const> payload, SystemState& nextState)
-                {
-                    auto classification = itch::classifyMessage(payload);
-
-                    if (classification == itch::MessageClassification::SystemEvent)
-                    {
-                        if (parseSystemEvent(payload) == expectedEvent)
-                        {
-                            nextState = successState;
-                        }
-                        else
-                        {
-                            nextState = triggerInconsistency();
-                        }
-                    }
-                },
-                [this](SourceEvent const& event, SystemState& nextState)
-                { normalEventHandler<Recovery>(event, nextState); });
-        }
-
-        template<bool Recovery>
         SystemState runWaiting() noexcept
         {
             return runStateLoop(
@@ -409,6 +382,7 @@ namespace alpdaq
                                 {
                                     container_.resumeTrading();
                                 }
+                                config_.logger->logLive();
                                 nextState = SystemState::Live;
                             }
                             else
@@ -458,17 +432,51 @@ namespace alpdaq
         template<bool Recovery>
         SystemState runAfterMarket() noexcept
         {
-            return runAwaitingSystemEvent<Recovery>(SystemState::AfterMarket,
-                                                    ItchSystemEvent::EndOfSystem,
-                                                    SystemState::AfterSystemHours);
+            return runStateLoop(
+                SystemState::AfterMarket,
+                [this](std::span<std::byte const> payload, SystemState& nextState)
+                {
+                    if (itch::classifyMessage(payload)
+                        == itch::MessageClassification::SystemEvent)
+                    {
+                        if (parseSystemEvent(payload) == ItchSystemEvent::EndOfSystem)
+                        {
+                            config_.logger->logAfterSystemHours();
+                            nextState = SystemState::AfterSystemHours;
+                        }
+                        else
+                        {
+                            nextState = triggerInconsistency();
+                        }
+                    }
+                },
+                [this](SourceEvent const& event, SystemState& nextState)
+                { normalEventHandler<Recovery>(event, nextState); });
         }
 
         template<bool Recovery>
         SystemState runAfterSystemHours() noexcept
         {
-            return runAwaitingSystemEvent<Recovery>(SystemState::AfterSystemHours,
-                                                    ItchSystemEvent::EndOfMessages,
-                                                    SystemState::EndOfDay);
+            return runStateLoop(
+                SystemState::AfterSystemHours,
+                [this](std::span<std::byte const> payload, SystemState& nextState)
+                {
+                    if (itch::classifyMessage(payload)
+                        == itch::MessageClassification::SystemEvent)
+                    {
+                        if (parseSystemEvent(payload) == ItchSystemEvent::EndOfMessages)
+                        {
+                            config_.logger->logEndOfDay();
+                            nextState = SystemState::EndOfDay;
+                        }
+                        else
+                        {
+                            nextState = triggerInconsistency();
+                        }
+                    }
+                },
+                [this](SourceEvent const& event, SystemState& nextState)
+                { normalEventHandler<Recovery>(event, nextState); });
         }
 
         SystemState runEndOfDay() noexcept
@@ -489,6 +497,7 @@ namespace alpdaq
             }
             else if (result == ProcessResult::EndOfDayEvent) [[unlikely]]
             {
+                config_.logger->logAfterMarket();
                 nextState = SystemState::AfterMarket;
             }
         }

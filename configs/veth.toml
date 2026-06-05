@@ -1,0 +1,45 @@
+# alpdaq configuration for the veth + avalanche test rig.
+#
+# Set up the pair first:  sudo scripts/veth-sim.sh up
+# Run avalanche on veth0:  ./avalanche/target/release/avalanche -y \
+#                              --live-interface 10.0.0.1 01302020.NASDAQ_ITCH50.gz
+# Run alpdaq on veth1:     sudo ./build-dev/app/nasdaq/alpdaq configs/veth.toml
+#
+# AF_XDP still requires root / CAP_NET_RAW+CAP_BPF even on a veth interface.
+
+# Symbols to subscribe to (max 8 chars each).
+stocks = ["AAPL", "MSFT", "TSLA"]
+
+# Directory for the asynchronous log file (alpdaq.log is written inside it).
+log_dir = "logs"
+
+# CPU pinning for the two threads. Integer core index, "auto", or "none".
+[pinning]
+main_thread = "auto"
+log_thread = "auto"
+
+[data]
+source = "network"
+
+[network]
+# Live multicast feed arrives on the AF_XDP-bound veth end. libxdp redirects the
+# entire RX queue here, so this interface must carry ONLY the live feed.
+interface = "veth1"
+queue_id = 0
+multicast_group = "239.1.1.1:18032"   # avalanche live default
+
+# Burst absorption. avalanche replays flat-out (--max-wait collapses the timeline, so it
+# is throughput-bound, not time-paced), and alpdaq consumes one packet per poll while a
+# rewind round-trip is in flight. Large RX/fill rings (4x the 4096 default) absorb the
+# bursts that would otherwise overflow the kernel RX ring and force gap recovery. Must be
+# powers of two; rx_batch <= rx_ring_size. UMEM is (fill+rx)*frame_size = 64 MiB here.
+fill_ring_size = 16384
+rx_ring_size = 16384
+rx_batch = 64
+
+# Recovery transports stay on loopback (not on veth1), so the libxdp redirect on
+# veth1 cannot hijack them.
+rewind_server = "127.0.0.1:18034"      # avalanche retransmission default
+glimpse_server = "127.0.0.1:18033"     # avalanche glimpse default
+glimpse_username = "USER01"
+glimpse_password = "SECRET"
